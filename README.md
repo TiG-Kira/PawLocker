@@ -203,14 +203,17 @@ DLL 跑在 LogonUI（SYSTEM 上下文）里，解不开 `%APPDATA%` 下那份**�
 ./gradlew :androidApp:assembleRelease
 # → androidApp/build/outputs/apk/release/androidApp-release.apk
 
-# Windows MSI
+# Windows MSI 安装包
 ./gradlew :windowsApp:packageMsi
-# → windowsApp/build/compose/binaries/main/msi/
+# → windowsApp/build/compose/binaries/main/msi/PawLocker-1.0.0.msi
+
+# 校验打包出的 runtime 真的够用（见下文「Windows MSI 安装包」）
+tools/check-runtime-modules.sh
 
 # 只编译，不打包
 ./gradlew :core:compileKotlinDesktop :ui:compileKotlinDesktop :windowsApp:compileKotlin
 
-# 单元测试（216 个用例）
+# 单元测试（229 个用例）
 ./gradlew :core:desktopTest
 ```
 
@@ -241,6 +244,53 @@ cp androidApp/keystore.properties.example androidApp/keystore.properties
 "$ANDROID_HOME/build-tools/<版本>/apksigner" verify --verbose --print-certs \
     androidApp/build/outputs/apk/release/androidApp-release.apk
 ```
+
+### Windows MSI 安装包
+
+产物约 64 MB，装完约 126 MB，结构是 `PawLocker.exe` + `app/`（72 个 jar）
++ `runtime/`（jlink 裁剪过的 JRE）。三件容易踩的事：
+
+**WiX 不用自己装，但必须是 3.x。** jpackage 在 Windows 上出 MSI 要靠 WiX 的
+`candle.exe` / `light.exe`，Compose 的 `downloadWix` 任务会自己去拉
+（本项目落在 `build/wix311`）。注意只认 **WiX 3.x** —— WiX 4/5 只提供 `wix.exe`，
+jpackage 不支持，装了也没用。
+
+**`upgradeUuid` 一旦发布就不能改。** Windows Installer 靠它判断「装的是同一产品的
+新版本」还是「另一个产品」。改了之后旧版本不再被识别为可升级，用户会看到两个
+PawLocker 并存，而且不先卸载旧版直接装新版会**安装失败**。
+
+**图标由脚本生成，不是手工素材。**
+
+```bash
+python tools/generate-icons.py
+# → windowsApp/icons/pawlocker.ico（7 个尺寸）+ pawlocker-1024.png
+```
+
+只依赖 Pillow。图形含义是「肉垫中央挖出钥匙孔」——爪印代表手机侧的口令，
+钥匙孔代表要开的那把锁。改形状或配色请改脚本里的常量重跑，
+不要直接编辑产出的 `.ico`（下次重跑就覆盖了）。
+
+#### 运行时模块会被 jlink 裁掉，这件事必须验
+
+打包用的 runtime 被 jlink 裁到只剩 7 个模块。而 Gradle 的测试跑在**完整 JDK** 上，
+装进 MSI 的应用跑在**裁剪 runtime** 上 —— 两者不等价，差异只在安装后才暴露。
+
+```bash
+./gradlew :windowsApp:packageMsi   # 先出包，runtime 才会生成
+tools/check-runtime-modules.sh
+```
+
+脚本从打包出的 `runtime/release` 里读模块清单，再用 `--limit-modules`
+构造出等价条件，把 JNA / ECDH / ECDSA / AES-GCM / HKDF / SecureRandom 跑一遍。
+**模块清单是读出来的，不是写死的**，所以不会随 Compose 升级而悄悄失效。
+
+重点盯 `jdk.crypto.ec`：ECDH 与 ECDSA 的实现不在 `java.base` 里，而是
+`jdk.crypto.ec` 提供的 Service Provider。它通过 ServiceLoader 加载，
+**`jdeps` 静态分析看不见**，所以 Compose 自带的 `checkRuntime` 任务也查不出来。
+一旦被裁，`KeyPairGenerator.getInstance("EC")` 会在运行期抛
+`NoSuchAlgorithmException` —— 配对整个废掉，且只在安装版复现。
+
+### 凭据提供程序（原生组件）
 
 凭据提供程序是原生组件，走独立的构建脚本（需要 VS 的「使用 C++ 的桌面开发」工作负载）：
 
@@ -281,17 +331,23 @@ credential-provider\sign.bat verify    rem Successfully verified
 
 compilable and testable 的部分都已完成并**通过编译与单元测试**：
 
-- core 层：密码学、协议、配对、解锁、防重放、三元绑定链 —— 216 个用例全绿
+- core 层：密码学、协议、配对、解锁、防重放、三元绑定链 —— 229 个用例全绿
 - 两端界面（Miuix）：设备页、配对页、管理页、设置页、首次启动向导
 - **原生凭据提供程序**：能出现在锁屏、挂进 Winlogon 登录流程，收到授权后自动提交
   （`ICredentialProvider` / `ICredentialProviderCredential2` / `ICredentialProviderSetUserArray`）
 - 凭据投递通道：命名管道现投，磁盘上不留机器可解副本
+- **Windows MSI 安装包**：`packageMsi` 可直接出包，含 7 个尺寸的图标、
+  稳定的 `upgradeUuid`、perMachine 安装；打包出的 runtime 已用
+  `tools/check-runtime-modules.sh` 验证过模块充分性
 
 尚未做的：
 
 - **真机端到端验证** —— 目前只过了编译器与单元测试，从未在真实锁屏上跑过一轮完整解锁
-- DLL 代码签名 —— 未经签名的凭据提供程序在部分策略下会被拒绝加载
+- **MSI 与 exe 的代码签名** —— 签名工具链已有（`credential-provider/sign.bat`），
+  但安装包本身还没签：SmartScreen 会拦，而且 UIAccess 要求可执行文件已签名
 - 托盘常驻与「关掉窗口仍继续服务」—— 需要把 `LockerServer` 挪进 Windows 服务
+- 凭据提供程序的注册仍走 `reg.exe` + 落盘 `.reg` 文件，待提权路径与其他操作统一
+  （见 [credential-provider/README.md §6.4](credential-provider/README.md)）
 
 ## 许可证
 
