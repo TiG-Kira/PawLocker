@@ -63,9 +63,27 @@ data class AppConfig(
 ) {
 
     fun normalized(): AppConfig = copy(
-        listenPort = listenPort.takeIf { it in 1..65535 } ?: Protocol.DEFAULT_PORT,
+        listenPort = migrateListenPort(listenPort),
         tunnel = tunnel.normalized(),
     )
+
+    /**
+     * 把仍然停在旧默认值的监听端口升到当前默认值。
+     *
+     * 只在值**恰好等于** [Protocol.LEGACY_DEFAULT_PORT] 时才动 ——
+     * 用户手动指定的其他端口一律原样保留。
+     *
+     * 已知取舍：老配置里没有「这个值是不是默认值」的记录，所以区分不了
+     * 「用户从没改过」和「用户主动选了 9898」。后者会被一并升走。
+     * 但两个方向的误伤并不对称：把 9898 升走，正好是这次改端口想要的结果；
+     * 而把用户自选的某个端口改掉，则会悄无声息地让他的手机再也连不上。
+     * 所以迁移范围严格限制在旧默认值这一个点上，不做任何「笼统的旧值修正」。
+     */
+    private fun migrateListenPort(current: Int): Int = when {
+        current == Protocol.LEGACY_DEFAULT_PORT -> Protocol.DEFAULT_PORT
+        current in 1..65535 -> current
+        else -> Protocol.DEFAULT_PORT
+    }
 }
 
 @Serializable

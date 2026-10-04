@@ -58,12 +58,12 @@ PawLocker/
 │             │               │                │             │               │
 │  ┌──────────▼────────────┐  │                │  ┌──────────▼────────────┐  │
 │  │     LockerClient      │  │                │  │     LockerServer      │  │
-│  │  握手 / 配对 / 解锁     │  │                │  │  监听 9898 / 验签 / 解密 │  │
+│  │  握手 / 配对 / 解锁     │  │                │  │  监听 28900 / 验签 / 解密 │  │
 │  └──────────┬────────────┘  │                │  └──────────┬────────────┘  │
 │             │               │                │             │               │
 │  ┌──────────▼────────────┐  │   加密 TCP      │  ┌──────────▼────────────┐  │
 │  │  IdentityKey (P-256)  │──┼───────────────►│  │  IdentityKey (P-256)  │  │
-│  │  AndroidKeyStore      │  │  9898 / 隧道    │  │  DPAPI 保护的 PKCS#8   │  │
+│  │  AndroidKeyStore      │  │  28900 / 隧道    │  │  DPAPI 保护的 PKCS#8   │  │
 │  └───────────────────────┘  │                │  └──────────┬────────────┘  │
 │                             │                │             │               │
 │  ┌───────────────────────┐  │                │  ┌──────────▼────────────┐  │
@@ -82,7 +82,7 @@ PawLocker/
 ```
 windowsApp:Main
   └─ ComputerApp
-       ├─ LockerServer        ← 持有 9898 监听，处理所有网络与密码学
+       ├─ LockerServer        ← 持有 28900 监听，处理所有网络与密码学
        ├─ AdminSideController ← ServerHooks 实现，把「需要人类介入」的两件事桥接到 UI
        └─ UnlockExecutor      ← 唯一的平台动作执行点
 ```
@@ -95,7 +95,7 @@ windowsApp:Main
 
 ```
 PawLockerService.exe   以 SYSTEM 身份注册为 Windows 服务
-   ├─ 持有 9898 端口与 LockerServer
+   ├─ 持有 28900 端口与 LockerServer
    ├─ 独占访问 DPAPI 加密的信任列表
    └─ 通过本地命名管道接收 UI 的指令
 

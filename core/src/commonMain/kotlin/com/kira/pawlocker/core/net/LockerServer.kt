@@ -35,7 +35,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 /**
  * Windows 端的监听服务。
  *
- * 一个 [LockerServer] 对应「监听 9898 端口 + 维护信任列表 + 执行解锁」这一整条链路。
+ * 一个 [LockerServer] 对应「监听端口 + 维护信任列表 + 执行解锁」这一整条链路。
  * UI 只负责调用 [start] / [stop] / [openPairingWindow]，以及实现 [ServerHooks]。
  *
  * 线程模型：所有网络操作跑在自己的 [CoroutineScope] 里，

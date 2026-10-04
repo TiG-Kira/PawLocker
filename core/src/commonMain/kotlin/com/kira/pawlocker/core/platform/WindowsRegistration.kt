@@ -33,9 +33,60 @@ data class RegistrationState(
     /** 开机启动项是否已写入（HKCU\...\Run）。 */
     val autoStartRegistered: Boolean = false,
 
-    /** 放行监听端口的入站防火墙规则是否存在。 */
+    /**
+     * 入站到 [port] 的流量当前是否真的被防火墙放行。
+     *
+     * 注意问的是「**放行状态**」，而不是「本程序创建的那条规则在不在」。
+     * 这个区别解决了一个真实的误报：
+     *
+     * Windows 在应用第一次监听端口时会弹出「允许应用通过防火墙」，
+     * 用户点「允许」后生成的是一条**按程序路径**的规则，显示名取自 MSI 的产品描述
+     * （这里是「PawLocker —— 手机远程解锁 Windows」），且 `LocalPort=Any`。
+     * 它和本程序自己创建的 `PawLocker (TCP $port)` 名字完全不同。
+     *
+     * 早先按名字精确匹配，于是体检**每次都报「防火墙未配置」**——
+     * 而端口其实早就通了。用户被反复引向一个会重复建规则、
+     * 还要过一次 UAC 的按钮，点了也「不生效」（因为检测逻辑本来就在看错的地方）。
+     */
     val firewallRulePresent: Boolean = false,
+
+    /**
+     * 命中的这条规则是不是**本程序自己创建的**。
+     *
+     * 用途只有一个：决定界面要不要给「移除」按钮。
+     * 因为 [WindowsRegistrar.removeFirewallRule] 是按名字删的，
+     * 只能删掉自己建的那条；命中的若是 Windows 在首次监听时自动生成的按应用规则，
+     * 按钮点下去会静默失败（删的规则不存在），而界面上「已就绪」依然亮着 ——
+     * 用户会以为按钮坏了。与其给一个点了没反应的按钮，不如不给。
+     */
+    val firewallRuleOwned: Boolean = false,
+
+    /** 命中的规则名，用于展示「是哪条规则在放行」。 */
     val firewallRuleName: String = "",
+
+    /** 命中规则的配置文件（如 `Private, Public`）。未探到为空串。 */
+    val firewallRuleProfiles: String = "",
+
+    /**
+     * 命中规则的本地端口范围。
+     *
+     * `Any` 是个值得让用户看见的值：它表示**该程序的所有端口**都被放行，
+     * 而不是只开了监听用的那一个。排查「为什么这个端口能通」时，
+     * 这条信息比规则本身更有解释力。
+     */
+    val firewallRuleLocalPorts: String = "",
+
+    /**
+     * 防火墙探测本身有没有跑成功。
+     *
+     * 与 [firewallRulePresent] 分开：后者说「放没放行」，这个说「我们有没有看出来」。
+     * 探测失败时不能把 `false` 当成「没放行」——那会催用户去重复配置一个
+     * 其实已经好的东西。遵循与签名探测相同的原则：宁可显示「无法确认」。
+     */
+    val firewallProbed: Boolean = false,
+
+    /** 防火墙探测失败的原因，用于界面展示与排障。 */
+    val firewallProbeError: String? = null,
     /** 体检所用的端口号，展示待办文案时要用。 */
     val port: Int = 0,
 
@@ -55,8 +106,16 @@ data class RegistrationState(
             add(
                 PendingStep(
                     key = PendingStep.KEY_FIREWALL,
-                    title = "放行监听端口",
-                    detail = "允许手机通过 TCP $port 连入本机",
+                    title = if (firewallProbed) "放行监听端口" else "确认监听端口已放行",
+                    detail = if (firewallProbed) {
+                        "没有找到允许手机通过 TCP $port 连入本机的规则"
+                    } else {
+                        // 探测失败时把话说清楚：不能让用户以为「没找到 = 没配」。
+                        // 这一步点下去要过一次 UAC，值得让他先知道我们其实没看出来。
+                        "无法确认本机防火墙是否已放行 TCP $port" +
+                            (firewallProbeError?.let { "（$it）" } ?: "") +
+                            "；可以直接点下面的按钮补一条规则，或先忽略"
+                    },
                 ),
             )
         }

@@ -172,7 +172,7 @@ class SignerTrustTest {
         )
 
         samples.forEach { (name, script) ->
-            val errors = parseErrors(script)
+            val errors = powershellParseErrors(script)
             assertTrue(
                 errors.isEmpty(),
                 "$name 脚本有语法错误：\n${errors.joinToString("\n")}\n--- 脚本原文 ---\n$script",
@@ -191,39 +191,6 @@ class SignerTrustTest {
             script.contains("""'C:\Users\O''Brien\it''s.dll'"""),
             "单引号应当翻倍后嵌入，实际脚本里找不到转义后的路径",
         )
-    }
-
-    /**
-     * 只解析、不执行，返回语法错误列表。
-     *
-     * 脚本正文走 stdin 传进去，而不是拼进 `-Command`：
-     * 待校验的脚本里本来就有大量引号和 `$`，再嵌一层引号只会验证「转义写对了没」，
-     * 而不是「被测脚本对不对」。
-     */
-    private fun parseErrors(script: String): List<String> {
-        val validator = """
-            ${'$'}text   = [Console]::In.ReadToEnd()
-            ${'$'}tokens = ${'$'}null
-            ${'$'}errors = ${'$'}null
-            ${'$'}null = [System.Management.Automation.Language.Parser]::ParseInput(${'$'}text, [ref]${'$'}tokens, [ref]${'$'}errors)
-            if (${'$'}errors.Count -gt 0) {
-                foreach (${'$'}e in ${'$'}errors) { Write-Output ${'$'}e.Message }
-                exit 1
-            }
-            exit 0
-        """.trimIndent()
-
-        val process = ProcessBuilder(
-            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", validator,
-        ).redirectErrorStream(true).start()
-
-        // 被测脚本先整段写进 stdin 再读输出：解析器要读完整段才会产出错误列表。
-        // 脚本只有几 KB，不会撑满管道缓冲区，不存在读写互相等待的死锁。
-        process.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(script) }
-        val output = process.inputStream.readBytes().toString(Charsets.UTF_8)
-        val exitCode = process.waitFor()
-
-        return if (exitCode == 0) emptyList() else output.lines().filter { it.isNotBlank() }
     }
 
     // ——————————————————————————————————————————————————————————————

@@ -204,7 +204,10 @@ class DeviceSideController(
             return
         }
         if (port == null || port !in 1..65535) {
-            lastMessage = UiMessage.Error("端口不合法", "端口应是 1–65535 之间的数字，默认 9898")
+            lastMessage = UiMessage.Error(
+                "端口不合法",
+                "端口应是 1–65535 之间的数字，默认 ${Protocol.DEFAULT_PORT}",
+            )
             return
         }
         if (draft.code.length != Protocol.PAIRING_CODE_DIGITS || draft.code.any { !it.isDigit() }) {
@@ -335,7 +338,7 @@ enum class PairingStage {
 
 data class ManualPairingDraft(
     val host: String = "",
-    val port: String = "9898",
+    val port: String = Protocol.DEFAULT_PORT.toString(),
     val code: String = "",
     val transportKind: TransportKind = TransportKind.MANUAL,
 )

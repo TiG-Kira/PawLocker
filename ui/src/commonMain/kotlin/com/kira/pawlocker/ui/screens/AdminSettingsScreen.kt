@@ -28,6 +28,8 @@ import com.kira.pawlocker.core.config.WindowsCredentialStore
 import com.kira.pawlocker.core.config.WindowsUnlockStrategy
 import com.kira.pawlocker.core.crypto.DeviceIds
 import com.kira.pawlocker.core.platform.DllSignatureStatus
+import com.kira.pawlocker.core.platform.RegistrationState
+import com.kira.pawlocker.core.protocol.Protocol
 import com.kira.pawlocker.ui.components.GroupCard
 import com.kira.pawlocker.ui.components.LabeledValue
 import com.kira.pawlocker.ui.components.StatusPill
@@ -75,8 +77,8 @@ fun AdminSettingsSection(controller: com.kira.pawlocker.ui.state.AdminSideContro
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        text = "默认 9898。改端口后需要在路由器 / frp 配置里同步修改，手机端不用改 —— " +
-                            "配对时会把新端口一起下发。",
+                        text = "默认 ${Protocol.DEFAULT_PORT}。改端口后需要在路由器 / frp 配置里同步修改，" +
+                            "手机端不用改 —— 配对时会把新端口一起下发。",
                         style = MiuixTheme.textStyles.footnote2,
                         color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                     )
@@ -406,9 +408,23 @@ fun AdminSettingsSection(controller: com.kira.pawlocker.ui.state.AdminSideContro
                         RegistrationRow(
                             title = "入站防火墙规则",
                             ready = state.firewallRulePresent,
-                            readyDetail = state.firewallRuleName,
-                            missingDetail = "没有规则时，Windows 会丢弃手机发来的连接",
-                            actionLabel = if (state.firewallRulePresent) "移除" else "放行",
+                            readyDetail = firewallReadyDetail(state),
+                            missingDetail = if (state.firewallProbed) {
+                                "没有规则时，Windows 会丢弃手机发来的连接"
+                            } else {
+                                // 探测失败时别说成「没配」——那是两回事，
+                                // 而且这一步点下去要过一次 UAC，值得先讲清楚。
+                                "无法确认是否已放行" +
+                                    (state.firewallProbeError?.let { "：$it" } ?: "")
+                            },
+                            // 命中的若是 Windows 在首次监听时自动创建的按应用规则，
+                            // 本程序按名字删不掉它。给个「移除」按钮只会点了没反应，
+                            // 而「已就绪」还亮着 —— 用户会以为按钮坏了。
+                            actionLabel = when {
+                                !state.firewallRulePresent -> "放行"
+                                state.firewallRuleOwned -> "移除"
+                                else -> null
+                            },
                             onAction = {
                                 if (state.firewallRulePresent) {
                                     controller.removeFirewallRule()
@@ -613,7 +629,8 @@ private fun RegistrationRow(
     ready: Boolean,
     readyDetail: String,
     missingDetail: String,
-    actionLabel: String,
+    /** 传 null 表示这一项没有可执行的动作 —— 与其给一个点了没反应的按钮，不如不给。 */
+    actionLabel: String?,
     onAction: () -> Unit,
 ) {
     Row(
@@ -638,8 +655,27 @@ private fun RegistrationRow(
             text = if (ready) "已就绪" else "待处理",
             tone = if (ready) StatusTone.Active else StatusTone.Warning,
         )
-        Spacer(Modifier.width(8.dp))
-        TextButton(text = actionLabel, onClick = onAction)
+        if (actionLabel != null) {
+            Spacer(Modifier.width(8.dp))
+            TextButton(text = actionLabel, onClick = onAction)
+        }
+    }
+}
+
+/**
+ * 把防火墙的放行状态压成一行说明。
+ *
+ * 特意把**放行范围**带出来：Windows 在应用首次监听时自动创建的规则是
+ * `LocalPort=Any`，也就是该程序的所有端口都放行；而本程序自己创建的规则
+ * 只开一个端口。两者是不同量级的暴露面，用户有权知道当前处于哪一种。
+ */
+private fun firewallReadyDetail(state: RegistrationState): String {
+    val name = state.firewallRuleName.ifBlank { "已放行" }
+    val ports = state.firewallRuleLocalPorts
+    return when {
+        ports.isBlank() -> name
+        ports.equals("Any", ignoreCase = true) -> "$name · 该程序全部端口"
+        else -> "$name · 端口 $ports"
     }
 }
 

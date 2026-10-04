@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.kira.pawlocker.core.protocol.Protocol
 import com.kira.pawlocker.core.protocol.TransportKind
 import com.kira.pawlocker.ui.components.GroupCard
 import com.kira.pawlocker.ui.components.StatusPill
@@ -227,7 +228,8 @@ private fun ManualPane(
                 Spacer(Modifier.height(8.dp))
                 Text(
                     text = "电脑端「配对」页会直接显示这两个值，" +
-                        "例如 192.168.1.10:9898（局域网）或 frp.example.com:19898（内网穿透）。",
+                        "例如 192.168.1.10:${Protocol.DEFAULT_PORT}（局域网）或 " +
+                        "frp.example.com:19898（内网穿透）。",
                     style = MiuixTheme.textStyles.footnote2,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                 )

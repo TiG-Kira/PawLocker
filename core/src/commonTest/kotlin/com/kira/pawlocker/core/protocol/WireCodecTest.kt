@@ -14,7 +14,9 @@ import kotlin.test.assertTrue
  */
 class WireCodecTest {
 
-    private val endpoint = Endpoint(TransportKind.LAN, "192.168.1.10", 9898, "家里 Wi-Fi")
+    // 端口故意用一个跟默认值无关的数：这份 fixture 测的是「显示串怎么拼」，
+    // 绑上 Protocol.DEFAULT_PORT 只会让以后改默认端口时误伤到这里。
+    private val endpoint = Endpoint(TransportKind.LAN, "192.168.1.10", 12345, "家里 Wi-Fi")
 
     private val samples: List<WireMessage> = listOf(
         ClientHello(
@@ -238,9 +240,13 @@ class WireCodecTest {
 
     @Test
     fun `端点显示串包含端口`() {
-        assertEquals("192.168.1.10:9898", endpoint.display)
+        assertEquals("192.168.1.10:12345", endpoint.display)
         assertEquals(Protocol.DEFAULT_PORT, Endpoint(TransportKind.LAN, "h").port)
-        assertEquals("h:9898", Endpoint(TransportKind.LAN, "h").display)
+        assertEquals(
+            "h:${Protocol.DEFAULT_PORT}",
+            Endpoint(TransportKind.LAN, "h").display,
+            "省略端口时应回落到默认端口，显示串要跟着它走而不是写死",
+        )
     }
 
     @Test

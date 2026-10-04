@@ -66,7 +66,9 @@ class DesktopWindowsRegistrar : WindowsRegistrar {
                 exe != null
         }.getOrDefault(false)
 
-        val ruleName = firewallRuleName(port)
+        // 防火墙探测按程序路径查，实测 53–70 ms；只有拿不到 exe 路径时
+        // 才会退化成 1 秒级的关键字通配。
+        val firewall = FirewallProbe.probe(port, exe)
 
         return RegistrationState(
             executablePath = exe,
@@ -75,8 +77,13 @@ class DesktopWindowsRegistrar : WindowsRegistrar {
             credentialProviderDllPresent = dllPresent,
             credentialProviderSignature = signature,
             autoStartRegistered = autoStartRegistered,
-            firewallRulePresent = firewallRuleExists(ruleName),
-            firewallRuleName = ruleName,
+            firewallRulePresent = firewall.allowed,
+            firewallRuleOwned = firewall.allowed && firewall.ruleName == firewallRuleName(port),
+            firewallRuleName = firewall.ruleName,
+            firewallRuleProfiles = firewall.profiles,
+            firewallRuleLocalPorts = firewall.localPorts,
+            firewallProbed = firewall.probed,
+            firewallProbeError = firewall.probeError,
             port = port,
             elevationHint = "注册凭据提供程序、信任签名证书与放行防火墙时都会弹出 UAC，需要你点「是」",
         )
@@ -234,15 +241,15 @@ class DesktopWindowsRegistrar : WindowsRegistrar {
         System.getProperty("jpackage.app-path")
             ?: ProcessHandle.current().info().command().orElse(null)
 
+    /**
+     * 本程序**创建**规则时用的名字。
+     *
+     * 只用于 [ensureFirewallRule] / [removeFirewallRule]，**不再用于检测** ——
+     * 检测改由 [FirewallProbe] 按程序路径做，因为 Windows 自己
+     * 在应用首次监听时生成的那条规则用的是另一个名字（取自安装包的产品描述），
+     * 拿这个名字去找它永远找不到。
+     */
     private fun firewallRuleName(port: Int) = "PawLocker (TCP $port)"
-
-    private fun firewallRuleExists(ruleName: String): Boolean = runCatching {
-        val process = ProcessBuilder(
-            "netsh.exe", "advfirewall", "firewall", "show", "rule", "name=$ruleName",
-        ).redirectErrorStream(true).start()
-        process.inputStream.bufferedReader().readText()
-        process.waitFor() == 0
-    }.getOrDefault(false)
 
     private fun registryKeyExistsSafely(path: String): Boolean =
         runCatching { Advapi32Util.registryKeyExists(WinReg.HKEY_LOCAL_MACHINE, path) }

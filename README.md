@@ -100,7 +100,7 @@ JDK 8+ 内置、Android API 26 起全量覆盖 —— 三端都不需要额外�
 
 ## 内网穿透
 
-电脑端对外暴露 **TCP 9898**，三条通道按优先级依次尝试：
+电脑端对外暴露 **TCP 28900**，三条通道按优先级依次尝试：
 
 | 优先级 | 通道                             | 适用                |
 | --- | ------------------------------ | ----------------- |
@@ -213,7 +213,7 @@ tools/check-runtime-modules.sh
 # 只编译，不打包
 ./gradlew :core:compileKotlinDesktop :ui:compileKotlinDesktop :windowsApp:compileKotlin
 
-# 单元测试（229 个用例）
+# 单元测试（250 个用例）
 ./gradlew :core:desktopTest
 ```
 
@@ -331,7 +331,7 @@ credential-provider\sign.bat verify    rem Successfully verified
 
 compilable and testable 的部分都已完成并**通过编译与单元测试**：
 
-- core 层：密码学、协议、配对、解锁、防重放、三元绑定链 —— 229 个用例全绿
+- core 层：密码学、协议、配对、解锁、防重放、三元绑定链 —— 250 个用例全绿
 - 两端界面（Miuix）：设备页、配对页、管理页、设置页、首次启动向导
 - **原生凭据提供程序**：能出现在锁屏、挂进 Winlogon 登录流程，收到授权后自动提交
   （`ICredentialProvider` / `ICredentialProviderCredential2` / `ICredentialProviderSetUserArray`）

@@ -14,7 +14,7 @@ PawLocker 主程序（Kotlin / JVM）**无法**在锁屏界面注入键盘输入
 ## 1. 它要解决的问题
 
 ```
-[手机] ──加密解锁指令──▶ [PawLocker.exe :9898]
+[手机] ──加密解锁指令──▶ [PawLocker.exe :28900]
                               │ 验签 / 防重放 / 解密 全部通过
                               │
                               │ SetEvent("Global\PawLocker.Unlock.<用户名>")
