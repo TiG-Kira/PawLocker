@@ -39,7 +39,12 @@ kotlin {
             implementation(libs.jna.platform)
         }
         commonTest.dependencies {
-            implementation(libs.junit)
+            // 断言与注解用 kotlin-test（target 无关）；JVM 上的运行器绑定在 desktopTest 里
+            implementation(libs.kotlin.test.core)
+        }
+        // 同上：自定义命名的 target 不生成 `desktopTest` 访问器
+        getByName("desktopTest").dependencies {
+            implementation(libs.kotlin.test.junit)
         }
     }
 }

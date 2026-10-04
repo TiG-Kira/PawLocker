@@ -144,3 +144,15 @@ actual object PlatformEnv {
     private const val FORMAT_VERSION: Byte = 1
     private const val IV_SIZE = 12
 }
+
+/**
+ * 手机端没有 Windows 账户概念，因此恒返回 [UserIdentity.Unknown]。
+ *
+ * 这不是遗漏：三元绑定链里的「Windows 账户」属于**电脑**，
+ * 手机只是在配对时把它记下来、在发解锁指令时原样回传。
+ * 手机自身的身份是设备身份密钥（AndroidKeyStore 里的那把）。
+ *
+ * 注意 [UserIdentity.Unknown] 的 `bindingKey` 是 `"name:"` 而不是空串 ——
+ * 电脑侧会拿自己解析出的账户去比对，不匹配就拒绝，不会因为「两边都空」而误判通过。
+ */
+actual fun currentUserIdentity(): UserIdentity = UserIdentity.Unknown

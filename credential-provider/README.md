@@ -121,38 +121,120 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{6F3A1C48-...}
 
 ---
 
-## 4. 凭据从哪来
+## 4. 凭据从哪来 —— 命名管道现投
 
-JVM 侧把 Windows 登录凭据（用户名 + 密码，或 PIN）用 **DPAPI** 加密后存在
-`%APPDATA%\PawLocker\` 下，作用域为当前用户。
+**这一节是最容易设计错的地方。**
 
-> **CP DLL 不能直接解密这个文件** —— 它跑在 Winlogon 进程（SYSTEM 上下文），
-> 与用户 DPAPI 作用域不互通。
+JVM 侧把 Windows 登录凭据用 **DPAPI（当前用户作用域）** 加密存在
+`%APPDATA%\PawLocker\secure\windows-credential.json`。这份文件**不能**直接给 DLL 用：
 
-因此实际部署时有两条路：
+> DLL 跑在 LogonUI 进程（SYSTEM 上下文），与用户 DPAPI 作用域不互通，解不开。
 
-| 方案 | 说明 | 取舍 |
+一个看起来更省事的做法是改用 `CRYPTPROTECT_LOCAL_MACHINE`（机器作用域）——
+那 DLL 就能解开。但它意味着**同机任何进程都能解开**，磁盘上等于常驻一份
+机器可解的密码副本。对「远程解锁」这个场景，这是不可接受的。
+
+所以采用**现投**：
+
+```
+   [PawLocker.exe]                                [PawLockerProvider.dll]
+        │                                                   │
+        │ 1. CreateNamedPipe(                                │
+        │      \\.\pipe\PawLocker.Cred.<账户>)               │
+        │ 2. SetEvent(Global\PawLocker.Unlock.<账户>) ──────▶ │ 看门狗被唤醒
+        │                                                   │ 3. CreateFile(管道)
+        │ 4. WriteFile([4字节长度][凭据块])  ◀───────────────┘
+        │ 5. 立刻清零内存里的明文副本                          │ 6. 解析 + 校验 SID
+        │                                                   │ 7. 提交给 Winlogon
+```
+
+关键点：
+
+| 问题 | 处理 |
+|---|---|
+| 磁盘上会不会留下机器可解的副本 | **不会。** 落盘的始终只有用户作用域的 DPAPI 密文 |
+| 是否需要自己配管道 ACL | **不需要。** 命名管道由用户进程创建时，默认 DACL 已含 SYSTEM 与当前用户，LogonUI 天然连得上 |
+| 为什么先建管道再置事件 | 反过来会留下「CP 被叫醒但管道还不存在」的竞态窗口 |
+| 主程序必须先启动吗 | 必须。但解锁指令本来就是它收的，所以这个前提天然成立 |
+
+### 4.1 凭据块格式（两端必须逐字节一致）
+
+`[4 字节小端总长][载荷]`，载荷为定长头 + 四个 UTF-8 字段：
+
+| 偏移 | 类型 | 含义 |
 |---|---|---|
-| **A. 由主程序写入共享内存 / 具名管道** | DLL 在收到事件后向主程序索取凭据，主程序解密后经一次性通道交给 DLL | 需要为通道设计好 ACL，且主程序必须在运行 |
-| **B. 用机器作用域 DPAPI + 额外加密** | `CRYPTPROTECT_LOCAL_MACHINE`，保护强度依赖附加的密钥派生 | 省事，但 SYSTEM 上下文可读，安全边界更弱 |
+| 0 | DWORD | magic，`'PWLC'` = `0x434C5750` |
+| 4 | WORD | 版本，当前 `1` |
+| 6 | WORD | 标志，bit0 = 含密码 |
+| 8 | DWORD | userName 字节数 |
+| 12 | DWORD | domain 字节数 |
+| 16 | DWORD | password 字节数 |
+| 20 | DWORD | sid 字节数 |
+| 24 | … | 四个字段依次排列（UTF-8，无结尾 NUL） |
 
-推荐 **A**。当前 JVM 侧已实现的是「写入 DPAPI 用户作用域」，
-方案 A 的传输通道属于本目录要补的部分。
+Kotlin 侧实现在 `core/desktopMain/.../platform/CredentialHandoff.kt`
+（`CredentialBlobCodec`）；C 侧在 `include/PawLockerContract.h`。
+
+> 用定长头而不是 JSON，是为了让 C 侧解析只走一趟、没有边界歧义 ——
+> 也不必为了一个字符串字段在原生侧手写 JSON 解析器，那是 bug 温床。
+
+### 4.2 密码在交给 LSA 之前的处理
+
+DLL 取到明文密码后，**不是**直接塞进 `KERB_INTERACTIVE_LOGON`，而是先用
+**`CredProtectW`**（凭据保护 API）加密：
+
+- 这个 API 的输出仍是一个 NUL 结尾的宽字符串，所以后续量长度仍可用 `wcslen`；
+- 解密由 LSA 在正确的登录上下文里完成 —— 这正是「把序列化凭据交给 Winlogon」
+  这条链路需要的语义；
+- 空密码不送进 `CredProtect`（它要求非空输入），已经是保护态的不重复保护。
+
+> 注意这里**不是** `CryptProtectData`。官方 CredentialProvider 示例用的就是
+> `CredProtectW`，且 LOGON 与 UNLOCK 两个场景处理方式相同，也没有域加入检测。
+
+### 4.3 绑定链：任何一环不符都不解锁
+
+「**电脑设备 + Windows 账户 + 手机**」三元绑定，中间那一环尤其容易被漏掉：
+一台家用电脑上如果有两个 Windows 账户，只绑设备的话，给 A 账户配的手机会把
+B 账户一起解开。所以账户身份被穿在四个位置上：
+
+| 位置 | 作用 |
+|---|---|
+| HKDF 的 salt | 密码学绑定 —— 为账户 A 派生的密钥解不开账户 B 的指令 |
+| `PairingOffer` / `ServerHello` | 让手机明确知道自己在和哪个账户配对 |
+| `UnlockRequest.targetUserSid`（进 AAD 与签名） | 「目标账户」成为不可篡改的显式声明 |
+| DLL 里的 `SidEquals` 校验 | 密码进入 LSA 之前的最后一道闸门 |
+
+最后一道尤其重要：它比对的是「LogonUI 实际正在为哪个账户解锁」，
+比主程序侧的推断更权威。**任一侧的 SID 为空一律判为不等** ——
+身份未知时必须拒绝，绝不能因为「两边都空」而静默放行。
+
 
 ---
 
 ## 5. 构建
 
-需要一个 C++ 工具链（Visual Studio 2022，含「使用 C++ 的桌面开发」工作负载）：
+本目录已经包含完整可编译的实现，直接用脚本构建：
 
 ```bat
-:: 需自行编写 CMakeLists.txt 或 .vcxproj
-cl /LD /EHsc /DUNICODE /D_UNICODE PawLockerProvider.cpp ^
-   /link /DEF:PawLockerProvider.def ole32.lib advapi32.lib secur32.lib
+credential-provider\build.bat
 ```
 
-构建完成后，在 PawLocker 的**首次启动向导**里选择「凭据提供程序」策略，
-向导会自动检测 DLL 是否存在、注册状态是否完整，并在你点击时弹 UAC 完成注册。
+脚本自己用 `vswhere` 找 Visual Studio、初始化 `vcvars64`、调编译器，
+**不依赖 CMake / MSBuild** —— 少一层抽象就少一处「本机能跑、换台机器跑不起来」的差异。
+
+产物：`credential-provider\build\PawLockerProvider.dll`
+
+需要 Visual Studio 的「**使用 C++ 的桌面开发**」工作负载。
+编译开了 `/W4 /WX`：这个组件跑在 LogonUI 里，一条被忽略的警告可能就是
+下次「用户登不进去」的伏笔，所以警告一律当错误处理。
+
+构建完成后，在 PawLocker 的**首次启动向导**或**设置 — 解锁方式**里选择
+「凭据提供程序」，向导会自动检测 DLL 与注册状态，并在你点击时弹 UAC 完成注册。
+
+> ⚠️ **DLL 需要代码签名**才能在启用 Secure Boot 的机器上进入锁屏界面 ——
+> Winlogon 只加载受信任的模块。开发和自用环境可以先跳过，
+> 但对外分发必须签名。
+
 
 ---
 

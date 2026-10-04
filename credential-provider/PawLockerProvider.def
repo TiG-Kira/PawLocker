@@ -1,0 +1,14 @@
+; PawLockerProvider.def
+;
+; Only the two entry points a COM in-process server needs are exported.
+;
+; Deliberately nothing else:
+;   - PRIVATE keeps them out of the import library, so nobody can link us statically
+;   - every extra export is one more surface another process could call into
+;
+; ASCII only: the linker reads this in the OEM codepage.
+
+LIBRARY PawLockerProvider
+EXPORTS
+    DllCanUnloadNow     PRIVATE
+    DllGetClassObject   PRIVATE

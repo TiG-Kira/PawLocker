@@ -86,6 +86,14 @@ data class ServerHello(
      * `confirmTag` 同时绑定了 pairingId 与双方公钥，被替换就必然校验失败。
      */
     val activePairingId: String? = null,
+    /**
+     * 本机当前登录的 Windows 账户。
+     *
+     * 「手动输入 host + port + 配对码」这条路径没有二维码可扫，
+     * 手机只能从这里拿到绑定的账户 —— 否则它无法构造出符合绑定链的配对请求。
+     */
+    val windowsUserSid: String = "",
+    val windowsUserName: String = "",
     /** 服务端时间，手机端据此校正本地时钟偏移。 */
     val serverTime: Long,
     /** 当前已信任手机数量，用于手机端展示。 */
@@ -116,6 +124,11 @@ data class PairRequest(
         val phonePublicKey: String,
         /** HMAC(K_code, "confirm" | windowsPub | phonePub | pairingId) */
         val confirmTag: String,
+        /**
+         * 手机原样回传它从邀请里读到的 Windows 账户。
+         * 电脑端必须比对 —— 不一致说明这条配对请求不是发给它的账户的。
+         */
+        val windowsUserSid: String = "",
         val requestedAt: Long,
     )
 }
@@ -147,6 +160,9 @@ data class PairResponse(
         val windowsPublicKey: String,
         /** HMAC(K_code, "confirm2" | windowsPub | phonePub | pairingId) */
         val serverConfirmTag: String,
+        /** 该配对绑定的 Windows 账户，手机端保存后用于后续解锁指令。 */
+        val windowsUserSid: String = "",
+        val windowsUserName: String = "",
         /** 配对完立刻把可达地址下发，手机端无需再问。 */
         val endpoints: List<Endpoint>,
         val pairedAt: Long,
@@ -167,6 +183,14 @@ data class PairResponse(
 @SerialName(MessageTypes.UNLOCK)
 data class UnlockRequest(
     val deviceId: String,
+    /**
+     * 这条指令要解锁的 **Windows 账户标识**（绑定链的中间一环）。
+     *
+     * 它同时进入 AAD 与签名：电脑端会拿本机真实账户去比对，
+     * 对不上就整条拒绝。这样「为 A 账户配对的手机会去开 B 账户」这件事
+     * 在指令层面就被阻断，而不是指望某处忘记检查时才不出事。
+     */
+    val targetUserSid: String,
     val counter: Long,
     val requestedAt: Long,
     val nonce: String,
@@ -188,6 +212,7 @@ data class UnlockRequest(
     fun aad(): ByteArray = buildString {
         append(Protocol.VERSION).append('|')
         append(deviceId).append('|')
+        append(targetUserSid).append('|')
         append(counter).append('|')
         append(requestedAt).append('|')
         append(nonce)

@@ -9,8 +9,15 @@ package com.kira.pawlocker.core.protocol
  */
 object Protocol {
 
-    /** 当前协议版本。任何字段语义变更都要 +1。 */
-    const val VERSION = 1
+    /**
+     * 当前协议版本。任何字段语义变更都要 +1。
+     *
+     * v2：引入「电脑设备 + Windows 账户 + 手机设备」三元绑定 ——
+     * 账户身份进入 HKDF 的 salt，并且必须出现在解锁指令的 AAD 与签名里。
+     * 这是不兼容变更（v1 的配对记录无法继续使用），因此版本号必须抬高，
+     * 让旧客户端在握手阶段就被明确拒绝，而不是以为配对成功却发现解不开锁。
+     */
+    const val VERSION = 2
 
     /** Windows 端默认监听端口。 */
     const val DEFAULT_PORT = 9898
@@ -65,6 +72,17 @@ object ErrorCodes {
     const val PAIRING_CODE_MISMATCH = "pairing_code_mismatch"
     const val DEVICE_NOT_TRUSTED = "device_not_trusted"
     const val DEVICE_REVOKED = "device_revoked"
+
+    /**
+     * 绑定链不匹配：设备对，但 Windows 账户对不上。
+     *
+     * 单独给一个错误码（而不是混进 `device_not_trusted`）是因为这两种情况
+     * 对用户意味着完全不同的下一步动作：设备不对要去重新配对，
+     * 账户不对说明「这台手机是配给另一个 Windows 账户的」，
+     * 需要在目标账户下重新配对，或者换一台手机。
+     */
+    const val USER_MISMATCH = "user_mismatch"
+
     const val BAD_SIGNATURE = "bad_signature"
     const val DECRYPT_FAILED = "decrypt_failed"
     const val REPLAY_DETECTED = "replay_detected"

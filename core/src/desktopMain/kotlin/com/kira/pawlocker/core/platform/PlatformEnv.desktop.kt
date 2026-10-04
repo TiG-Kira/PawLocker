@@ -152,3 +152,36 @@ actual object PlatformEnv {
         }
     }
 }
+
+/**
+ * 本机当前 Windows 账户身份 —— 三元绑定链的中间一环。
+ *
+ * 结果缓存：解析 SID 要拉一个 `whoami` 进程，而账户在进程生命周期内不会变。
+ *
+ * 用 `whoami.exe` 而不是 JNA 的令牌 API：`whoami` 在所有受支持的 Windows 上都在，
+ * 输出里的 SID 文本与系统语言无关；令牌 API 则要自己处理 `TOKEN_USER`
+ * 结构体布局与 PSID 释放，出错面更大 —— 而这里并不需要那种精度。
+ */
+private val cachedUserIdentity: UserIdentity by lazy {
+    val accountName = System.getProperty("user.name").orEmpty()
+    val sid = if (accountName.isBlank()) "" else runCatching {
+        val process = ProcessBuilder("whoami", "/user", "/fo", "csv", "/nh")
+            .redirectErrorStream(true)
+            .start()
+        val finished = process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)
+        if (!finished) {
+            process.destroyForcibly()
+            ""
+        } else {
+            extractSidFrom(process.inputStream.bufferedReader().readText())
+        }
+    }.getOrDefault("")
+
+    if (sid.isBlank()) {
+        // 注意：这段代码在 `PlatformEnv` 对象之外，`log` 必须带接收者显式调用
+        PlatformEnv.log("PlatformEnv", "未能解析当前账户 SID，绑定链将退化为按账户名匹配")
+    }
+    UserIdentity(sid = sid, accountName = accountName, displayName = accountName)
+}
+
+actual fun currentUserIdentity(): UserIdentity = cachedUserIdentity

@@ -23,6 +23,7 @@ import com.kira.pawlocker.core.platform.RegistrationResult
 import com.kira.pawlocker.core.platform.RegistrationState
 import com.kira.pawlocker.core.platform.WindowsRegistrar
 import com.kira.pawlocker.core.platform.createWindowsRegistrar
+import com.kira.pawlocker.core.platform.currentUserIdentity
 import com.kira.pawlocker.core.protocol.PairingOffer
 import com.kira.pawlocker.core.protocol.UnlockRequest
 import com.kira.pawlocker.core.trust.PeerRole
@@ -58,6 +59,9 @@ class AdminSideController(
     private val server = LockerServer(
         identity = identity,
         profile = profile,
+        // 本机当前 Windows 账户 —— 三元绑定链的中间一环。
+        // 解析结果在进程内缓存，不会每次解锁都去拉 whoami
+        localUser = currentUserIdentity(),
         trustStore = trustStore,
         hooks = this,
     )

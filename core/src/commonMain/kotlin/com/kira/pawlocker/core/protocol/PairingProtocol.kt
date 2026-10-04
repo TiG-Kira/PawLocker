@@ -10,6 +10,7 @@ import com.kira.pawlocker.core.crypto.PairSecret
 import com.kira.pawlocker.core.crypto.PlatformCrypto
 import com.kira.pawlocker.core.crypto.ProtocolLabels
 import com.kira.pawlocker.core.crypto.constantTimeEquals
+import com.kira.pawlocker.core.platform.UserIdentity
 import com.kira.pawlocker.core.trust.PeerRole
 import com.kira.pawlocker.core.trust.TrustRecord
 import kotlinx.serialization.Serializable
@@ -107,6 +108,15 @@ data class PairingOffer(
     val computerDeviceId: String,
     val computerDisplayName: String,
     val computerPublicKey: String,
+    /**
+     * 这台电脑当前登录的 Windows 账户（连在绑定链中间的那一环）。
+     *
+     * 放进邀请里是为了让手机**明确知道自己配的是哪个账户** ——
+     * 用户能看到「正在与 书房主机 · Kira（S-1-5-21-…）配对」，而不是只看到一个机器名。
+     * 手机端还会把它原样回传，电脑端据此拒绝「拿着 A 账户的邀请去配 B 账户」这类错配。
+     */
+    val windowsUserSid: String = "",
+    val windowsUserName: String = "",
     val endpoints: List<Endpoint>,
     val expiresAt: Long,
 ) {
@@ -151,6 +161,13 @@ class PhonePairingSession(
     val code: String,
     val computerPublicKey: ByteArray,
     val computerDisplayName: String,
+    /**
+     * 邀请里声明的目标 Windows 账户 —— 手机会在配对请求里原样回传。
+     * 没有默认值：调用方必须显式决定「这次配的是哪个账户」，
+     * 不能因为忘了传而退化成「不绑定账户」。
+     */
+    val windowsUserSid: String,
+    val windowsUserName: String,
     private val phoneKey: IdentityKey,
     private val phoneProfile: DeviceProfile,
     val startedAt: Long,
@@ -179,6 +196,7 @@ class PhonePairingSession(
                     pairingId = pairingId,
                 ),
             ),
+            windowsUserSid = windowsUserSid,
             requestedAt = now,
         )
 
@@ -246,6 +264,16 @@ class PhonePairingSession(
             )
         }
 
+        // 电脑确认的账户必须与邀请里声明的一致。
+        // 不一致意味着「本机账户在配对窗口期内被切换过」或「响应被中间人替换」，
+        // 两种情况下都不能把这条配对记下来。
+        if (payload.windowsUserSid != windowsUserSid) {
+            throw PairingException(
+                ErrorCodes.USER_MISMATCH,
+                "电脑端返回的 Windows 账户与邀请不符，配对已中止",
+            )
+        }
+
         val computerPub = Base64Url.decode(payload.windowsPublicKey)
         val expectedTag = PairingProtocol.confirmTag(
             key = pairingKey,
@@ -268,6 +296,7 @@ class PhonePairingSession(
             pairingId = pairingId,
             windowsPublicKey = computerPub,
             phonePublicKey = phoneKey.publicKey,
+            windowsUserSid = payload.windowsUserSid,
         )
         PlatformCrypto.wipe(sharedSecret)
         PlatformCrypto.wipe(pairingKey)
@@ -282,6 +311,8 @@ class PhonePairingSession(
             secret = secret.encode(),
             endpoints = payload.endpoints,
             pairedAt = payload.pairedAt.coerceAtLeast(now),
+            windowsUserSid = payload.windowsUserSid,
+            windowsUserName = payload.windowsUserName,
         )
     }
 }
@@ -300,6 +331,11 @@ class ComputerPairingSession(
     val code: String,
     private val computerKey: IdentityKey,
     private val computerProfile: DeviceProfile,
+    /**
+     * 发起配对时本机登录的 Windows 账户。
+     * 它会进入邀请、参与密钥派生、并被写进信任记录 —— 绑定链的中间一环。
+     */
+    val windowsUser: UserIdentity,
     val createdAt: Long,
     val ttlMillis: Long = Protocol.PAIRING_TTL_MILLIS,
 ) {
@@ -320,6 +356,8 @@ class ComputerPairingSession(
         computerDeviceId = DeviceIds.fromPublicKey(computerKey.publicKey),
         computerDisplayName = computerProfile.displayName,
         computerPublicKey = Base64Url.encode(computerKey.publicKey),
+        windowsUserSid = windowsUser.bindingKey,
+        windowsUserName = windowsUser.displayName,
         endpoints = endpoints,
         expiresAt = expiresAt(),
     )
@@ -380,6 +418,16 @@ class ComputerPairingSession(
             throw PairingException(ErrorCodes.INTERNAL, "设备标识与公钥不匹配")
         }
 
+        // 绑定链的中间一环：手机回传的 Windows 账户必须就是本机当前账户。
+        // 不匹配的典型原因是「配对窗口开着的时候有人切换了登录账户」，
+        // 更坏的情况是响应被换成了另一个账户的邀请 —— 两种都必须中止。
+        if (payload.windowsUserSid != windowsUser.bindingKey) {
+            throw PairingException(
+                ErrorCodes.USER_MISMATCH,
+                "本次配对请求绑定的 Windows 账户与本机当前账户不一致",
+            )
+        }
+
         return payload
     }
 
@@ -414,6 +462,8 @@ class ComputerPairingSession(
                     pairingId = pairingId,
                 ),
             ),
+            windowsUserSid = windowsUser.bindingKey,
+            windowsUserName = windowsUser.displayName,
             endpoints = endpoints,
             pairedAt = now,
         )
@@ -448,6 +498,7 @@ class ComputerPairingSession(
             pairingId = pairingId,
             windowsPublicKey = computerKey.publicKey,
             phonePublicKey = phonePub,
+            windowsUserSid = windowsUser.bindingKey,
         )
         PlatformCrypto.wipe(sharedSecret)
         PlatformCrypto.wipe(pairingKey)
@@ -465,6 +516,8 @@ class ComputerPairingSession(
             pairedAt = now,
             lastSeenAt = now,
             lastCounter = 0,
+            windowsUserSid = windowsUser.bindingKey,
+            windowsUserName = windowsUser.displayName,
         )
     }
 }

@@ -74,9 +74,19 @@ object WindowsCredentialStore {
     }
 
     fun save(credential: WindowsCredential) {
+        // 保存时补上 SID —— 它是「设备 + Windows 账户 + 手机」绑定链的中间一环。
+        // 界面未必知道 SID（用户只输用户名和密码），但这一环不能留空：
+        // 留空会让 Credential Provider 侧的校验直接拒绝，用户看到的是「解锁没反应」。
+        val bound = if (credential.userSid.isNotBlank()) {
+            credential
+        } else {
+            val local = com.kira.pawlocker.core.platform.currentUserIdentity()
+            credential.copy(userSid = local.sid, userName = credential.userName.ifBlank { local.accountName })
+        }
+
         PlatformEnv.writeSecure(
             FILE,
-            json.encodeToString(WindowsCredential.serializer(), credential).encodeToByteArray(),
+            json.encodeToString(WindowsCredential.serializer(), bound).encodeToByteArray(),
         )
     }
 

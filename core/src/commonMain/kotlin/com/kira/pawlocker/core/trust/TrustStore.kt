@@ -43,6 +43,19 @@ data class TrustRecord(
     val lastCounter: Long = 0,
     /** 用户是否已经人工比对过 SAS emoji */
     val sasVerified: Boolean = false,
+    /**
+     * 这条信任关系绑定的 **Windows 账户**（绑定链的中间一环）。
+     *
+     *  - 在电脑端的记录里：本机自己的账户
+     *  - 在手机端的记录里：那台电脑配对时的账户
+     *
+     * 两端都必须存：手机发解锁指令时要带回去，电脑收指令时要拿本机真实账户比对。
+     * 它同时参与了密钥派生，所以即使有人改了文件里的这个字段，
+     * 也只会让解密失败 —— 改不回一个「能用的错绑定」。
+     */
+    val windowsUserSid: String = "",
+    /** 账户显示名，仅用于界面展示。 */
+    val windowsUserName: String = "",
 ) {
 
     fun resolveSecret(): PairSecret = PairSecret.decode(secret)

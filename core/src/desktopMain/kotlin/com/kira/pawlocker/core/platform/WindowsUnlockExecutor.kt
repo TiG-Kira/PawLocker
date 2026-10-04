@@ -99,23 +99,44 @@ class WindowsUnlockExecutor(
     }
 
     /**
-     * 给 Credential Provider 发一个命名事件信号。
-     * 本机没有安装 CP（`PawLockerProvider.dll` 未注册）时事件打开会失败，
-     * 此时给出明确引导，而不是静默失败让用户以为手机端坏了。
+     * 给 Credential Provider 发信号，并把凭据现投过去。
+     *
+     * 三步的顺序不能换：
+     *  1. `OpenEvent` —— 先确认组件在不在（不存在就早退，不要白发一个信号）
+     *  2. `listen()`  —— 把命名管道挂起来。**必须在置位事件之前**，
+     *     否则会出现「CP 被叫醒了但管道还没有」的竞态
+     *  3. `SetEvent` + `deliver` —— 通知并投递
      */
     private suspend fun signalCredentialProvider(action: String): UnlockOutcome =
         withContext(Dispatchers.IO) {
             if (!isWindows()) {
                 return@withContext UnlockOutcome.Failure(ErrorCodes.INTERNAL, "当前不是 Windows 环境")
             }
-            if (!WindowsCredentialStore.exists()) {
-                return@withContext UnlockOutcome.Failure(
+
+            val credential = WindowsCredentialStore.load()
+                ?: return@withContext UnlockOutcome.Failure(
                     ErrorCodes.UNLOCK_REJECTED,
                     "尚未在本机保存登录凭据，请先在设置页完成「凭据配置」",
                 )
+
+            val localUser = currentUserIdentity()
+            val accountName = System.getProperty("user.name").orEmpty()
+
+            // 绑定链的中间一环（主程序侧预检）：
+            // 保存的凭据必须是为本机当前账户的。CP 侧还会用 LogonUI 的真实会话再校验一次，
+            // 这里先拦一道是为了给出「配错账户了」这种可操作的提示，而不是让用户等到最后一步。
+            if (credential.userSid.isNotBlank() &&
+                localUser.isResolved &&
+                credential.userSid != localUser.sid
+            ) {
+                return@withContext UnlockOutcome.Failure(
+                    ErrorCodes.USER_MISMATCH,
+                    "本机保存的凭据属于账户「${credential.userName}」（${credential.userSid}），" +
+                        "与当前登录账户「${localUser.description}」不一致。请重新配置凭据。",
+                )
             }
 
-            val eventName = UNLOCK_EVENT_PREFIX + System.getProperty("user.name")
+            val eventName = UNLOCK_EVENT_PREFIX + accountName
             val handle: WinNT.HANDLE? = runCatching {
                 Kernel32.INSTANCE.OpenEvent(EVENT_MODIFY_STATE, false, eventName)
             }.getOrNull()
@@ -128,8 +149,18 @@ class WindowsUnlockExecutor(
                 )
             }
 
+            val handoff = CredentialHandoff(accountName)
+            val session = handoff.listen()
+                ?: run {
+                    Kernel32.INSTANCE.CloseHandle(handle)
+                    return@withContext UnlockOutcome.Failure(
+                        ErrorCodes.INTERNAL,
+                        "无法建立凭据投递通道（命名管道创建失败）",
+                    )
+                }
+
             try {
-                // 事件置位 = 「本次解锁已授权」，CP 侧读到凭据后自行完成登录
+                // 事件置位 = 「本次解锁已授权」
                 if (!Kernel32.INSTANCE.SetEvent(handle)) {
                     val code = Kernel32.INSTANCE.GetLastError()
                     return@withContext UnlockOutcome.Failure(
@@ -137,7 +168,41 @@ class WindowsUnlockExecutor(
                         "向登录组件发送信号失败（Win32 错误码 $code）",
                     )
                 }
-                PlatformEnv.log(TAG, "已通知 Credential Provider 执行解锁，动作=$action")
+
+                // CP 收到事件才会来连管道。连不上通常意味着锁屏界面上没有我们的磁贴
+                // （比如当前根本没锁屏，或组件刚注册还没生效）。
+                if (!session.awaitClient()) {
+                    return@withContext UnlockOutcome.Failure(
+                        ErrorCodes.UNLOCK_REJECTED,
+                        "登录组件没有响应。请确认电脑处于锁屏界面；" +
+                            "若刚注册过组件，需要重启一次才生效。",
+                    )
+                }
+
+                val blob = CredentialBlobCodec.encode(
+                    userName = credential.userName,
+                    domain = credential.domain,
+                    password = credential.password,
+                    // 记录里没存 SID 时用本机当前账户兜底 —— CP 侧仍会拿
+                    // LogonUI 的真实会话 SID 再校验一次，所以这不是绕过
+                    sid = credential.userSid.ifBlank { localUser.sid },
+                )
+
+                val delivered = try {
+                    session.deliver(blob)
+                } finally {
+                    // 明文只在这条语句的作用域里存在过，用完立刻抹掉
+                    CredentialBlobCodec.wipe(blob)
+                }
+
+                if (!delivered) {
+                    return@withContext UnlockOutcome.Failure(
+                        ErrorCodes.INTERNAL,
+                        "凭据投递失败，登录组件没有接收到数据",
+                    )
+                }
+
+                PlatformEnv.log(TAG, "已向 Credential Provider 投递凭据并请求解锁，动作=$action")
                 UnlockOutcome.Success(PlatformEnv.currentTimeMillis())
             } finally {
                 Kernel32.INSTANCE.CloseHandle(handle)

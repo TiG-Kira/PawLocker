@@ -38,6 +38,11 @@ object UnlockProtocol {
         phoneKey: IdentityKey,
         phoneDeviceId: String,
         clientDisplayName: String,
+        /**
+         * 要解锁的 Windows 账户 —— 由信任记录提供，**不是**从当前环境实时取的。
+         * 手机只知道「我配的是哪个账户」，它不该、也无法猜测电脑现在登录了谁。
+         */
+        targetWindowsUserSid: String,
         counter: Long,
         now: Long,
         action: String = UnlockAction.UNLOCK,
@@ -47,6 +52,7 @@ object UnlockProtocol {
         // 先拼一个「部分」请求，用它的 aad() 作为 AEAD 附加数据
         val header = UnlockRequest(
             deviceId = phoneDeviceId,
+            targetUserSid = targetWindowsUserSid,
             counter = counter,
             requestedAt = now,
             nonce = nonce,
@@ -80,6 +86,8 @@ object UnlockProtocol {
      * Windows 侧：校验并解出指令。
      *
      * @param phonePublicKey 来自**信任记录**，绝不能用报文里带的公钥
+     * @param expectedWindowsUserSid 本机**真实**的 Windows 账户标识；
+     *        与指令里声明的目标不一致就整条拒绝（绑定链的中间一环）
      * @param guard 进程级共享的防重放守卫
      * @throws UnlockRejectedException 任一环节失败
      */
@@ -87,6 +95,7 @@ object UnlockProtocol {
         request: UnlockRequest,
         phonePublicKey: ByteArray,
         secret: PairSecret,
+        expectedWindowsUserSid: String,
         guard: ReplayGuard,
         now: Long,
     ): UnlockRequest.Payload {
@@ -106,7 +115,18 @@ object UnlockProtocol {
             )
         }
 
-        // ② 新鲜性 —— 时间窗口 / 计数器 / nonce
+        // ② 绑定链 —— 目标 Windows 账户必须是本机当前账户。
+        // 放在防重放之前：一条「账户不对」的指令不该消耗掉计数器额度，
+        // 否则同一台手机切到别的账户发一次指令，就能把它自己的正常解锁挤掉。
+        if (request.targetUserSid != expectedWindowsUserSid) {
+            throw UnlockRejectedException(
+                ErrorCodes.USER_MISMATCH,
+                "这条指令指向的 Windows 账户（${request.targetUserSid.ifBlank { "未声明" }}）" +
+                    "与本机当前账户不一致，已拒绝执行",
+            )
+        }
+
+        // ③ 新鲜性 —— 时间窗口 / 计数器 / nonce
         val replay = guard.validate(
             deviceId = request.deviceId,
             counter = request.counter,
@@ -121,7 +141,7 @@ object UnlockProtocol {
             )
         }
 
-        // ③ 机密性与完整性
+        // ④ 机密性与完整性
         val plaintext = runCatching {
             Aead.open(
                 key = secret.encKey,

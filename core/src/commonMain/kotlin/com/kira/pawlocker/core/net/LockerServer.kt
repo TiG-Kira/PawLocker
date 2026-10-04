@@ -4,6 +4,7 @@ import com.kira.pawlocker.core.crypto.DeviceIds
 import com.kira.pawlocker.core.crypto.DeviceProfile
 import com.kira.pawlocker.core.crypto.IdentityKey
 import com.kira.pawlocker.core.platform.PlatformEnv
+import com.kira.pawlocker.core.platform.UserIdentity
 import com.kira.pawlocker.core.protocol.ClientHello
 import com.kira.pawlocker.core.protocol.ComputerPairingSession
 import com.kira.pawlocker.core.protocol.Endpoint
@@ -43,6 +44,13 @@ import kotlinx.coroutines.withTimeoutOrNull
 class LockerServer(
     private val identity: IdentityKey,
     private val profile: DeviceProfile,
+    /**
+     * 本机当前登录的 Windows 账户 —— 三元绑定链（设备 / 账户 / 手机）的中间一环。
+     *
+     * 由平台侧解析后注入，而不是在这里现取：一来解析要拉进程、不想每次解锁都拉，
+     * 二来测试需要能构造一个确定的账户来验证「账户不匹配必须拒绝」。
+     */
+    private val localUser: UserIdentity,
     private val trustStore: TrustStore,
     private val hooks: ServerHooks,
     private val guard: ReplayGuard = ReplayGuard(),
@@ -135,11 +143,16 @@ class LockerServer(
             code = com.kira.pawlocker.core.protocol.PairingProtocol.randomCode(),
             computerKey = identity,
             computerProfile = profile,
+            windowsUser = localUser,
             createdAt = now,
         )
         pairingSession = session
         hooks.onEvent(
-            ServerEvent(now, ServerEventKind.PAIRING_OPENED, "已开启配对窗口，有效期 120 秒"),
+            ServerEvent(
+                now,
+                ServerEventKind.PAIRING_OPENED,
+                "已开启配对窗口，有效期 120 秒；本次配对将绑定账户「${localUser.description}」",
+            ),
         )
         return session.offer(advertisedEndpoints)
     }
@@ -228,6 +241,8 @@ class LockerServer(
                     nonce = com.kira.pawlocker.core.protocol.PairingProtocol.newNonce(),
                     pairingOpen = activePairing != null && !activePairing.isExpired(PlatformEnv.currentTimeMillis()),
                     activePairingId = activePairing?.pairingId,
+                    windowsUserSid = localUser.bindingKey,
+                    windowsUserName = localUser.displayName,
                     serverTime = PlatformEnv.currentTimeMillis(),
                     trustedDeviceCount = trustedPhones().size,
                 ),
@@ -347,6 +362,31 @@ class LockerServer(
             return
         }
 
+        // ——— 绑定链的第二环：账户 ———
+        // 设备对上了，还要确认这条信任关系是为**本机当前账户**建立的。
+        // 少了这一步，「给账户 A 配对的手机」就能把同机账户 B 一起解开 ——
+        // 家用电脑多账户、共用电脑的场景下这不是理论问题。
+        if (record.windowsUserSid != localUser.bindingKey) {
+            throttle.recordFailure(remote, now)
+            val boundTo = record.windowsUserName.ifBlank { record.windowsUserSid.ifBlank { "未知账户" } }
+            connection.send(
+                ErrorMessage(
+                    ErrorCodes.USER_MISMATCH,
+                    "「${record.displayName}」是为 Windows 账户「$boundTo」配对的，" +
+                        "不能解锁当前账户「${localUser.description}」。请在该账户下重新配对。",
+                ),
+            )
+            hooks.onEvent(
+                ServerEvent(
+                    at = PlatformEnv.currentTimeMillis(),
+                    kind = ServerEventKind.UNLOCK_FAILED,
+                    message = "「${record.displayName}」绑定的账户（$boundTo）与当前账户不符，已拒绝",
+                    deviceName = record.displayName,
+                ),
+            )
+            return
+        }
+
         val secret = record.resolveSecret()
 
         val payload = try {
@@ -354,6 +394,7 @@ class LockerServer(
                 request = request,
                 phonePublicKey = record.publicKeyBytes(),
                 secret = secret,
+                expectedWindowsUserSid = localUser.bindingKey,
                 guard = guard,
                 now = now,
             )

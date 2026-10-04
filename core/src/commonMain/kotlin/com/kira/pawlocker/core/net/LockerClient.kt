@@ -83,6 +83,9 @@ class LockerClient(
                 code = code,
                 computerPublicKey = Base64Url.decode(offer.computerPublicKey),
                 computerDisplayName = hello.displayName,
+                // 邀请里已经写明这次配对绑定的是电脑上的哪个 Windows 账户
+                windowsUserSid = offer.windowsUserSid,
+                windowsUserName = offer.windowsUserName,
                 phoneKey = identity,
                 phoneProfile = profile,
                 startedAt = now,
@@ -142,6 +145,9 @@ class LockerClient(
                 code = code,
                 computerPublicKey = Base64Url.decode(hello.publicKey),
                 computerDisplayName = hello.displayName,
+                // 手动路径没有二维码，账户信息从 ServerHello 里取
+                windowsUserSid = hello.windowsUserSid,
+                windowsUserName = hello.windowsUserName,
                 phoneKey = identity,
                 phoneProfile = profile,
                 startedAt = now,
@@ -236,6 +242,8 @@ class LockerClient(
                 phoneKey = identity,
                 phoneDeviceId = phoneDeviceId,
                 clientDisplayName = profile.displayName,
+                // 目标账户取自信任记录：这条记录是为哪个账户配的对，就只解锁哪个账户
+                targetWindowsUserSid = record.windowsUserSid,
                 counter = counter,
                 now = now,
                 action = action,

@@ -25,3 +25,13 @@ local.properties
 # 注意：不要整目录忽略 —— .workbuddy/skills/ 是要跟团队共享的项目级技能
 .workbuddy/memory/
 .workbuddy/sessions/
+
+# 原生凭据提供程序的构建产物
+/credential-provider/build/
+*.obj
+*.pdb
+*.exp
+
+# 链接中间产物（正常情况下会被 /IMPLIB 收进 build/）
+/credential-provider/*.lib
+/credential-provider/*.exp

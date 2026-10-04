@@ -24,7 +24,6 @@ jna = "5.19.1"
 
 # —— 通用 ——
 zxing = "3.5.4"
-junit = "4.13.2"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
@@ -83,4 +82,8 @@ zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
 jna-core = { module = "net.java.dev.jna:jna", version.ref = "jna" }
 jna-platform = { module = "net.java.dev.jna:jna-platform", version.ref = "jna" }
 
-junit = { module = "junit:junit", version.ref = "junit" }
+# 测试
+# 注意别名命名：`kotlin-test` 与 `kotlin-test-junit` 前缀冲突，会让前者被降级成
+# 分组（`libs.kotlin.test.junit` 反而成了 kotlin-test 的访问器）。加 -core 后缀避开。
+kotlin-test-core = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+kotlin-test-junit = { module = "org.jetbrains.kotlin:kotlin-test-junit", version.ref = "kotlin" }

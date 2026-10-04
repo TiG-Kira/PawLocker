@@ -66,34 +66,68 @@ class PairSecret(
         }
 
         /**
-         * 由 ECDH 共享秘密派生。两侧的 `pairingId`、双方公钥都会进 salt / info，
-         * 保证即使 (Windows, 手机A) 与 (Windows, 手机B) 的共享秘密意外相同，
-         * 派生结果也不会相同。
+         * 由 ECDH 共享秘密派生。
+         *
+         * 参与派生的四样东西都进 salt / info：
+         *  - 双方公钥（把身份绑进密钥）
+         *  - `pairingId`（把「这一次配对」绑进去）
+         *  - `windowsUserSid`（**把 Windows 账户绑进去** —— 三元绑定链的中间一环）
+         *
+         * 最后一条是关键：即使同一对设备、同一台电脑为两个不同的 Windows 账户
+         * 各配一次对，派生出来的密钥也完全不同。于是「为账户 A 配对的手机」
+         * 在密码学上就解不开账户 B 的指令 —— 不依赖任何一方的自觉检查。
+         *
+         * 字段之间插入分隔字节，避免拼接歧义（否则 A|BC 与 AB|C 会撞车）。
          */
         fun derive(
             sharedSecret: ByteArray,
             pairingId: String,
             windowsPublicKey: ByteArray,
             phonePublicKey: ByteArray,
+            windowsUserSid: String,
         ): PairSecret {
             val salt = PlatformCrypto.sha256(
-                windowsPublicKey + phonePublicKey + pairingId.encodeToByteArray(),
+                windowsPublicKey + SEPARATOR +
+                    phonePublicKey + SEPARATOR +
+                    pairingId.encodeToByteArray() + SEPARATOR +
+                    windowsUserSid.encodeToByteArray(),
             )
             return PairSecret(
                 encKey = Hkdf.derive(sharedSecret, salt, ProtocolLabels.ENC_KEY, 32),
                 macKey = Hkdf.derive(sharedSecret, salt, ProtocolLabels.MAC_KEY, 32),
             )
         }
+
+        private val SEPARATOR = byteArrayOf(0x00)
     }
 }
 
-/** HKDF 的 info 标签，集中管理，防止两处代码写错字符串导致密钥不一致。 */
+/**
+ * HKDF 的 info 标签，集中管理，防止两处代码写错字符串导致密钥不一致。
+ *
+ * ## [KDF_VERSION] 与 `Protocol.VERSION` 是两件事
+ *
+ * `Protocol.VERSION` 说的是**线路格式**（报文里有哪些字段、判别值叫什么）；
+ * [KDF_VERSION] 说的是**密钥派生方案**（salt/info 怎么拼、掺进哪些东西）。
+ * 二者独立演进：v2 只是给线路加了账户绑定字段，派生方案的**结构**没变，
+ * 但参与派生的输入变了 —— 这时就该抬 [KDF_VERSION]，
+ * 让新旧密钥在派生域上彻底隔离，而不是指望 salt 恰好不同。
+ *
+ * 放在这里而不是引用 `Protocol.VERSION`，是为了不让 `crypto` 反向依赖
+ * `protocol`（后者已经大量依赖前者）。
+ */
 object ProtocolLabels {
-    const val PAIRING_KEY = "PawLocker/v1/pairing-protection"
-    const val PAIRING_TAG = "PawLocker/v1/pairing-confirm"
-    const val ENC_KEY = "PawLocker/v1/enc"
-    const val MAC_KEY = "PawLocker/v1/mac"
-    const val UNLOCK_TAG = "PawLocker/v1/unlock-signature"
+
+    /** 密钥派生方案的版本。改动 salt / info 的构造方式时必须 +1。 */
+    const val KDF_VERSION = 2
+
+    private const val NS = "PawLocker/v$KDF_VERSION"
+
+    const val PAIRING_KEY = "$NS/pairing-protection"
+    const val PAIRING_TAG = "$NS/pairing-confirm"
+    const val ENC_KEY = "$NS/enc"
+    const val MAC_KEY = "$NS/mac"
+    const val UNLOCK_TAG = "$NS/unlock-signature"
 }
 
 /**
