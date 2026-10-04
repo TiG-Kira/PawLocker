@@ -1,0 +1,22 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+# 注意：不能写成 `/build` —— 那只忽略根目录，
+# core/ ui/ androidApp/ windowsApp/ 各自的 build 产物会全部被提交进来
+build/
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+.kotlin
+
+# 应用运行期产物
+*.log
+/pawlocker-config.json
+/dist
+*.exe
+*.msi
+*.apk
+*.aab

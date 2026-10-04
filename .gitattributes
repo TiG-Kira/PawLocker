@@ -1,0 +1,23 @@
+# 统一行尾。
+# 不写这一条时，Windows 上 core.autocrlf=true 会把 gradlew 也转成 CRLF，
+# 提交后 Linux / macOS 克隆下来会直接报 "bad interpreter"。
+* text=auto eol=lf
+
+# Shell 脚本必须是 LF，否则 Linux / macOS 上无法执行
+gradlew text eol=lf
+
+# Windows 批处理必须是 CRLF
+*.bat text eol=crlf
+
+# 二进制文件不要做任何行尾转换
+*.jar binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.dll binary
+*.exe binary
+*.msi binary
+
+# 生成的产物不参与 diff 与语言统计
+*.apk binary
+*.aab binary

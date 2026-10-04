@@ -1,0 +1,154 @@
+package com.kira.pawlocker.core.platform
+
+import com.sun.jna.platform.win32.Crypt32Util
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.attribute.PosixFilePermission
+
+/**
+ * Windows DPAPI（`CryptProtectData` / `CryptUnprotectData`）。
+ *
+ * 用当前用户作用域加密，含义是：**同一台机器上的其他用户、以及把文件拷走的攻击者
+ * 都无法解密**，只有当前登录用户的 DPAPI 主密钥可以。
+ *
+ * 这也是为什么 PawLocker 的信任列表与身份私钥可以直接放在 `%APPDATA%` 下 ——
+ * 明文只有进程内存里存在，落盘的永远是密文。
+ */
+internal object Dpapi {
+
+    val available: Boolean = runCatching {
+        System.getProperty("os.name").orEmpty().startsWith("Windows")
+    }.getOrDefault(false)
+
+    fun protect(plaintext: ByteArray): ByteArray = if (available) {
+        Crypt32Util.cryptProtectData(plaintext)
+    } else {
+        // 非 Windows（开发机上的 Linux/macOS 跑 desktop target）退化为明文，
+        // 生产环境只会是 Windows，所以这里只保证不崩
+        plaintext
+    }
+
+    fun unprotect(ciphertext: ByteArray): ByteArray = if (available) {
+        Crypt32Util.cryptUnprotectData(ciphertext)
+    } else {
+        ciphertext
+    }
+}
+
+/**
+ * Windows 平台环境。
+ *
+ * 数据目录：`%APPDATA%\PawLocker`
+ *  - `secure\` —— DPAPI 保护的内容（信任列表、身份私钥）
+ *  - `logs\`   —— 运行日志
+ *  - `frpc.toml` —— 自动生成的内网穿透客户端配置
+ */
+actual object PlatformEnv {
+
+    private var overrideRoot: String? = null
+
+    actual val platformName: String = "Windows"
+
+    actual fun init(handle: Any?) {
+        // 单测可以传入临时目录
+        if (handle is String && handle.isNotBlank()) overrideRoot = handle
+    }
+
+    actual val dataDir: String
+        get() {
+            overrideRoot?.let { return File(it).apply { mkdirs() }.absolutePath }
+            val appData = System.getenv("APPDATA")
+                ?: System.getProperty("user.home")
+            return File(appData, "PawLocker").apply { mkdirs() }.absolutePath
+        }
+
+    /** Windows 没有 AndroidKeyStore，但 DPAPI 由操作系统密钥材料保护。 */
+    actual val hasHardwareKeyStore: Boolean = Dpapi.available
+
+    actual fun currentTimeMillis(): Long = System.currentTimeMillis()
+
+    /**
+     * 枚举本机 IPv4 地址。
+     *
+     * 会过滤掉回环、虚拟网卡与 APIPA（169.254.x.x）—— 后者出现说明 DHCP 没拿到地址，
+     * 把它下发给手机只会让连接尝试白白多花几秒超时。
+     * Tailscale / ZeroTier 的虚拟网卡**保留**，它们正是「虚拟组网」通道要用的地址。
+     */
+    actual fun localIpv4Addresses(): List<String> = try {
+        java.net.NetworkInterface.getNetworkInterfaces().toList()
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { nic -> nic.inetAddresses.toList().map { nic to it } }
+            .filter { (_, address) ->
+                address is java.net.Inet4Address &&
+                    !address.isLoopbackAddress &&
+                    !address.isLinkLocalAddress
+            }
+            .map { (_, address) -> address.hostAddress.orEmpty().substringBefore('%') }
+            .filter { it.isNotBlank() }
+            .distinct()
+    } catch (error: Throwable) {
+        log("PlatformEnv", "枚举本机地址失败: ${error.message}")
+        emptyList()
+    }
+
+    actual fun log(tag: String, message: String) {
+        val line = "[${java.time.LocalDateTime.now()}] [$tag] $message"
+        println(line)
+        runCatching {
+            val logFile = File(File(dataDir, "logs").apply { mkdirs() }, "pawlocker.log")
+            if (logFile.length() > 5L * 1024 * 1024) logFile.writeText("")
+            logFile.appendText(line + System.lineSeparator())
+        }
+    }
+
+    actual fun writeSecure(name: String, data: ByteArray) {
+        val file = fileFor(name)
+        val sealed = Dpapi.protect(data)
+        file.writeBytes(sealed)
+        restrictToCurrentUser(file)
+    }
+
+    actual fun readSecure(name: String): ByteArray? {
+        val file = fileFor(name)
+        if (!file.exists()) return null
+        return runCatching { Dpapi.unprotect(file.readBytes()) }.getOrElse { error ->
+            log("PlatformEnv", "解密 $name 失败：${error.message}")
+            null
+        }
+    }
+
+    actual fun deleteSecure(name: String) {
+        fileFor(name).delete()
+    }
+
+    private const val SECURE_DIR = "secure"
+
+    private fun fileFor(name: String): File =
+        File(File(dataDir, SECURE_DIR).apply { mkdirs() }, name)
+
+    /**
+     * 把文件 ACL 收紧到「仅当前用户 + SYSTEM」。
+     * DPAPI 已经保证了机密性，这一步是额外的纵深防御 ——
+     * 防止同机其他管理员进程随意读取（虽然它们拿不到当前用户的 DPAPI 主密钥）。
+     */
+    private fun restrictToCurrentUser(file: File) {
+        runCatching {
+            val path = file.toPath()
+            val supported = path.fileSystem.supportedFileAttributeViews().contains("posix")
+            if (supported) {
+                Files.setPosixFilePermissions(
+                    path,
+                    setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+                )
+            } else {
+                // Windows：清空继承并只授予当前用户
+                val user = System.getProperty("user.name") ?: return@runCatching
+                ProcessBuilder(
+                    "icacls", file.absolutePath,
+                    "/inheritance:r",
+                    "/grant:r", "$user:(R,W)",
+                ).redirectErrorStream(true).start().waitFor()
+            }
+        }
+    }
+}
