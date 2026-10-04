@@ -231,7 +231,7 @@ androidApp:MainActivity (FragmentActivity)
 
 所有网络操作都不在 Main 线程上执行。UI 永远不会被 IO 卡住。
 
-### 「需要人点头」的弹窗必须挂在 Scaffold 内部
+### 「需要人点头」的确认 UI：内联，不用弹窗
 
 Miuix 的 `OverlayDialog` **不是**自己画对话框的。它只做两件事：
 
@@ -239,33 +239,41 @@ Miuix 的 `OverlayDialog` **不是**自己画对话框的。它只做两件事�
 2. 什么都不画
 
 真正把它画出来的是 `MiuixPopupHost` —— 而 `MiuixPopupHost` **只有 `Scaffold` 会调用**
-（`MiuixPopupUtils.Companion.MiuixPopupHost`，Miuix 内部函数，`internal` 修饰，
-外部模块调不到）。
+（`MiuixPopupUtils.Companion.MiuixPopupHost`，Miuix 的 `internal` 函数，外部模块调不到）。
 
 所以把 `OverlayDialog` 放在 Scaffold 外面会**静默不显示**：
 
 - 没有异常
 - 没有日志
 - 协议层那边照常 `await()` 到 60 秒超时断开
-- 手机端只看到「扫码后没反应」
+- 手机端只看到「扫码后等一会儿就没反应」
 
-「PC 端收不到配对允许窗口」这个 bug 有**两层**，症状一模一样：
+「PC 端收不到配对允许窗口」这个 bug 追到底有**三层**，症状完全一样：
 
 | 层 | 写法 | 失败方式 |
 |---|---|---|
 | 1 | 弹窗只挂在 `AdminScreen` 里 | 用户停在向导页 / 登录小窗时组件根本不创建 |
 | 2 | 弹窗提到 `ComputerApp` 顶层（仍不在 Scaffold 里） | 组件创建了，登记进 CompositionLocal，但没人读 → 不渲染 |
+| 3 | 三个页面各挂一份（在 Scaffold 内） | 能渲染了，但弹窗会突然盖在用户正在看的东西上，且容易被漏看 |
 
-第 1 层修好后第 2 层才暴露出来。这类 bug 靠读代码很难一次看全，
-**必须真机跑一遍**。
+第 3 层能工作但仍然不好：手机扫完码，电脑端一个对话框凭空冒出来，
+用户可能正看着别的东西；而第 1、2 层的教训说明这个路径已经错了两次。
 
-现在的做法：状态（`AdminSideController.pendingApproval`）提到全局唯一，
-组件（`PairingApprovalDialog`）在**每一个带 Scaffold 的桌面页面**里各渲染一份。
-多渲染几份组件不会产生多个待确认请求 —— 都读同一份状态，
-`resolveApproval` 也是幂等的。
+**最终修法：管理页内联横幅。** 状态（`AdminSideController.pendingApproval`）
+保持全局唯一，UI 是管理页顶部一条横幅 `PendingPairingBanner`，
+外加左侧导航「配对」项的红点提示。配对区里再放一份 `PendingPairingCard`，
+因为用户点开「配对」就是要处理这件事，这一屏必须自足。
 
-> **新增页面的检查项**：如果打算往这个页面里加 `OverlayDialog`，
-> 先确认它在 Scaffold **内部**。想放全局就得先问「谁提供 MiuixPopupHost」。
+内联渲染不依赖那套 CompositionLocal —— **看到就是真的**。
+
+代价：用户停在首次启动向导 / 锁屏登录小窗时看不到横幅。
+那两页不接受确认，但服务端照常接受连接，横幅一出现在管理页立刻生效；
+协议层的确认超时是 60 秒，从扫码到点开管理页通常远小于这个窗口。
+真要更稳，下一步是把 `LockerServer` 挪进 Windows 服务，用托盘气泡提示。
+
+> **诊断手法**：怀疑某个 Miuix 组件不显示时，`javap -classpath <miuix jar>`
+> 看它依赖谁。注意 `MiuixPopupHost` 在字节码里是 `public final`，
+> 但 Kotlin 元数据标 `internal` → 编译报 unresolved。**别被 javap 误导**，两个都查。
 
 ---
 

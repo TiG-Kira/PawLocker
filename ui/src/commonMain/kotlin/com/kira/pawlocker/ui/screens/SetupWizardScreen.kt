@@ -129,12 +129,16 @@ fun SetupWizardScreen(
         }
     }
 
-    // 配对审批弹窗必须挂在**本页的 Scaffold 内部**。
-    // Miuix 的 OverlayDialog 只是往 CompositionLocal 登记渲染记录，
-    // 真正把它画出来的是 MiuixPopupHost —— 而只有 Scaffold 会调用它。
-    // 放在 Scaffold 外面会静默不显示（无异常、无日志、手机端照常超时）。
-    // 详见 PairingApproval.kt 的说明。
-    PairingApprovalDialog(controller)
+    // 这里**故意不挂**配对审批弹窗。
+    //
+    // Miuix 的 OverlayDialog 不自己画对话框：它只往 LocalDialogStates
+    // 登记渲染记录，真正画它的是 MiuixPopupHost，而只有 Scaffold 调用它。
+    // 放到本页没问题，但那样它在三个页面各有一份、状态又只有一个，
+    // 排查时很难判断屏幕上那个到底是不是当前这一份。
+    //
+    // 改成「只有管理页的内联横幅」，理由与代价见 AdminScreen.PendingPairingBanner。
+    // 服务端在本页照常接受连接；横幅一出现在管理页立刻生效，
+    // 而协议层的确认超时是 60 秒，扫完码到点开管理页通常远小于这个窗口。
 }
 
 private enum class WizardStep(val title: String) {

@@ -215,13 +215,13 @@ class AdminSideController(
     }
 
     /**
-     * 配对确认框的「允许」/「拒绝」。
+     * 配对确认的「允许」/「拒绝」。
      *
-     * 由按钮回调驱动，跑在主线程，所以 [pendingApproval] 可以直接写。
+     * 由管理页内联卡片的按钮回调驱动，跑在主线程，所以 [pendingApproval] 可以直接写。
      *
      * 无论哪种结果都要 `complete` —— 漏掉的话协议层那个
      * `deferred.await()` 会一直挂到 60 秒超时，手机端表现为「转圈到没」。
-     * `complete` 之后再置空是为了让点击立刻关窗，不必等 await 的调用方醒来。
+     * `complete` 之后再置空是为了让点击立刻收起卡片，不必等 await 的调用方醒来。
      */
     fun resolveApproval(approved: Boolean) {
         val deferred = approvalDeferred
@@ -443,7 +443,7 @@ class AdminSideController(
      * 1. **必须切到主线程写 `pendingApproval`。** 本方法由 `LockerServer` 的
      *    协程（`Dispatchers.Default`）调用，直接写 `mutableStateOf` 属于
      *    后台线程写快照。写本身不会崩，但重组调度不可靠 ——
-     *    表现就是「有时候弹得出来，有时候半天不弹」。
+     *    表现就是「有时候卡片出得来，有时候半天不出」。
      *
      * 2. **`approvalDeferred` 要先赋值再改状态。** 顺序反了会出现
      *    「UI 已经渲染出按钮，但 deferred 还没就绪」的窗口，

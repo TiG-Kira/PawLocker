@@ -103,24 +103,43 @@ fun AdminScreen(
             )
         },
     ) { innerPadding ->
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(top = innerPadding.calculateTopPadding()),
         ) {
-            AdminNav(
+            // 待确认的配对请求以**横幅**形式钉在所有分区顶部，而不是弹窗。
+            //
+            // 换成内联是被逼出来的：Miuix 的 OverlayDialog 只是往
+            // LocalDialogStates 登记渲染记录，真正画它的是 MiuixPopupHost，
+            // 而只有 Scaffold 调用 MiuixPopupHost。挂在任何 Scaffold 之外都会
+            // 登记成功、永不渲染，且**无异常无日志** —— 手机端只能看到
+            // 「等待一会儿就没反应」，协议层那边 await 到 60 秒超时。
+            //
+            // 内联渲染不依赖那套 CompositionLocal，看到就是真的。
+            // 代价是它属于管理页：用户在首次启动向导 / 锁屏登录小窗时看不到。
+            // 那两个场景下一律先回管理页（顶部横幅 + 导航红点都会提示），
+            // 而不是让手机端干等。
+            PendingPairingBanner(
                 controller = controller,
-                current = section,
-                onSelect = { section = it },
-                modifier = Modifier.width(220.dp).fillMaxHeight(),
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             )
 
-            Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                when (section) {
-                    AdminSection.TrustedPhones -> TrustedPhonesSection(controller)
-                    AdminSection.Pairing -> PairingSection(controller)
-                    AdminSection.Activity -> ActivitySection(controller)
-                    AdminSection.Settings -> AdminSettingsSection(controller)
+            Row(modifier = Modifier.fillMaxSize()) {
+                AdminNav(
+                    controller = controller,
+                    current = section,
+                    onSelect = { section = it },
+                    modifier = Modifier.width(220.dp).fillMaxHeight(),
+                )
+
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    when (section) {
+                        AdminSection.TrustedPhones -> TrustedPhonesSection(controller)
+                        AdminSection.Pairing -> PairingSection(controller)
+                        AdminSection.Activity -> ActivitySection(controller)
+                        AdminSection.Settings -> AdminSettingsSection(controller)
+                    }
                 }
             }
         }
@@ -128,11 +147,8 @@ fun AdminScreen(
 
     // ———— 手机请求配对：电脑端确认 ————
     //
-    // ⚠️ 确认框**不在这里渲染**。它是跨页面的全局状态：
-    // 服务端在任何页面（首次启动向导 / 登录小窗 / 管理页）都在接受连接，
-    // 弹窗只挂在管理页的话，用户停在向导页时就会看到「手机配对没反应」，
-    // 而协议层那边 `deferred.await()` 一直挂着，60 秒后静默超时断开 ——
-    // 两端都没有任何错误提示。统一提到 ComputerApp 顶层渲染。
+    // 确认入口是 [PendingPairingBanner]（本页顶部横幅），
+    // 不用弹窗 —— 原因见横幅上的注释。
 
     // ———— 服务错误 ————
     val error = controller.lastError
@@ -152,13 +168,88 @@ fun AdminScreen(
             }
         }
     }
+}
 
-    // 配对审批弹窗必须挂在**本页的 Scaffold 内部**。
-    // Miuix 的 OverlayDialog 只是往 CompositionLocal 登记渲染记录，
-    // 真正把它画出来的是 MiuixPopupHost —— 而只有 Scaffold 会调用它。
-    // 放在 Scaffold 外面会静默不显示（无异常、无日志、手机端照常超时）。
-    // 详见 PairingApproval.kt 的说明。
-    PairingApprovalDialog(controller)
+/**
+ * 「这台手机想配对，允许吗？」——钉在管理页顶部的一条横幅。
+ *
+ * ## 为什么是内联横幅而不是弹窗
+ *
+ * 这是被 Miuix 逼出来的。`OverlayDialog` 不自己画对话框，它只往
+ * `LocalDialogStates`（`staticCompositionLocalOf`）登记一条渲染记录，
+ * 真正把它画出来的是 `MiuixPopupHost` —— 而**只有 `Scaffold` 会调用
+ * `MiuixPopupHost`**。所以弹窗放在任何 Scaffold 之外都会
+ * **登记成功、永不渲染**，且无异常无日志：手机端只能看到
+ * 「扫码后等一会儿就没反应」，协议层那边 await 到 60 秒超时断开。
+ *
+ * 「登记了但没人画」比「没创建」更难查 —— 前者日志里连一条线索都不留。
+ *
+ * 内联渲染不依赖那套 CompositionLocal，看到就是真的。
+ *
+ * ## 代价与补救
+ *
+ * 代价：它属于管理页，用户停在首次启动向导 / 锁屏登录小窗时看不到。
+ * 补救：两处。导航里「配对」项带红点；本页顶部横幅在**所有分区**都显示，
+ * 所以只要用户人在管理页，视线扫到顶部就知道。
+ * 那两个场景下服务端仍然照常接受连接 —— 横幅一出现立刻生效，
+ * 而协议层的超时是 60 秒，从生成配对码到扫码通常远小于这个窗口。
+ */
+@Composable
+private fun PendingPairingBanner(
+    controller: AdminSideController,
+    modifier: Modifier = Modifier,
+) {
+    val pending = controller.pendingApproval ?: return
+
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.defaultColors(
+            color = MiuixTheme.colorScheme.secondaryContainer,
+        ),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StatusPill(text = "等待确认", tone = StatusTone.Warning)
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = "这台手机正在请求配对",
+                    style = MiuixTheme.textStyles.title3,
+                    color = MiuixTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+
+            Spacer(Modifier.height(10.dp))
+            LabeledValue("设备名称", pending.phoneDisplayName)
+            LabeledValue("型号", pending.phoneModel)
+            LabeledValue("设备 ID", pending.phoneDeviceId.take(26) + "…")
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "确认这台手机是你本人的操作再点「允许」。允许后它将可以解锁这台电脑。",
+                style = MiuixTheme.textStyles.footnote2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+
+            Spacer(Modifier.height(14.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                TextButton(
+                    text = "拒绝",
+                    onClick = { controller.resolveApproval(false) },
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    text = "允许配对",
+                    onClick = { controller.resolveApproval(true) },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                )
+            }
+        }
+    }
 }
 
 private enum class AdminSection(val label: String) {
@@ -218,7 +309,14 @@ private fun AdminNav(
                         } else {
                             MiuixTheme.colorScheme.onSurface
                         },
+                        modifier = Modifier.weight(1f),
                     )
+                    // 有手机在等确认时给导航项标红点。
+                    // 顶部横幅已经够显眼，但用户此刻可能正停在「运行日志」
+                    // 那一屏滚动 —— 横幅会被 viewport 边缘切掉一半。
+                    if (entry == AdminSection.Pairing && controller.pendingApproval != null) {
+                        StatusPill(text = "待确认", tone = StatusTone.Warning)
+                    }
                 }
             }
         }
@@ -395,8 +493,16 @@ private fun TrustedPhonesSection(controller: AdminSideController) {
 private fun PairingSection(controller: AdminSideController) {
     val offer = controller.pairingOffer
 
+    // 顶部横幅已经显示过一次，这里只在配对区再显示一份 ——
+    // 用户点开「配对」就是要处理这件事，这一屏必须是自足的，
+    // 不能让人先滚回顶部才知道有请求在等。
+    val pending = controller.pendingApproval
+
     if (offer == null) {
         Column(modifier = Modifier.fillMaxSize()) {
+            if (pending != null) {
+                PendingPairingCard(controller)
+            }
             EmptyState(
                 icon = MiuixIcons.ScreenMirroring,
                 title = "尚未开启配对",
@@ -420,11 +526,74 @@ private fun PairingSection(controller: AdminSideController) {
         return
     }
 
-    PairingOfferView(
-        offer = offer,
-        onClose = { controller.closePairingWindow() },
-        advertisedAddresses = controller.advertisedEndpoints().map { it.display to it.kind.displayName },
-    )
+    Column(modifier = Modifier.fillMaxSize()) {
+        if (pending != null) {
+            PendingPairingCard(controller)
+        }
+        PairingOfferView(
+            offer = offer,
+            onClose = { controller.closePairingWindow() },
+            advertisedAddresses = controller.advertisedEndpoints()
+                .map { it.display to it.kind.displayName },
+        )
+    }
+}
+
+/**
+ * 待确认的配对请求卡片。与 [PendingPairingBanner] 共用同一份状态与动作，
+ * 只是外层留白不同 —— 两处都要有是因为用户可能停在任何分区。
+ */
+@Composable
+private fun PendingPairingCard(controller: AdminSideController) {
+    val pending = controller.pendingApproval ?: return
+
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+        colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StatusPill(text = "等待确认", tone = StatusTone.Warning)
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = "这台手机正在请求配对",
+                    style = MiuixTheme.textStyles.title3,
+                    color = MiuixTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+
+            Spacer(Modifier.height(10.dp))
+            LabeledValue("设备名称", pending.phoneDisplayName)
+            LabeledValue("型号", pending.phoneModel)
+            LabeledValue("设备 ID", pending.phoneDeviceId.take(26) + "…")
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "确认这台手机是你本人的操作再点「允许」。允许后它将可以解锁这台电脑。",
+                style = MiuixTheme.textStyles.footnote2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+
+            Spacer(Modifier.height(14.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                TextButton(
+                    text = "拒绝",
+                    onClick = { controller.resolveApproval(false) },
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(
+                    text = "允许配对",
+                    onClick = { controller.resolveApproval(true) },
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.textButtonColorsPrimary(),
+                )
+            }
+        }
+    }
 }
 
 @Composable
