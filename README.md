@@ -171,9 +171,13 @@ DLL 跑在 LogonUI（SYSTEM 上下文）里，解不开 `%APPDATA%` 下那份**�
 与 Android SDK（compileSdk 37）。
 
 ```bash
-# Android APK
+# Android 调试包
 ./gradlew :androidApp:assembleDebug
 # → androidApp/build/outputs/apk/debug/androidApp-debug.apk
+
+# Android 正式包（R8 压缩 + 混淆 + 签名）
+./gradlew :androidApp:assembleRelease
+# → androidApp/build/outputs/apk/release/androidApp-release.apk
 
 # Windows MSI
 ./gradlew :windowsApp:packageMsi
@@ -184,6 +188,34 @@ DLL 跑在 LogonUI（SYSTEM 上下文）里，解不开 `%APPDATA%` 下那份**�
 
 # 单元测试（216 个用例）
 ./gradlew :core:desktopTest
+```
+
+### release 包的签名
+
+签名凭据放在 `androidApp/keystore.properties`（**已被 gitignore**），
+不要写进 `build.gradle.kts` —— 后者会被提交，密码写进去等于公开。
+
+```bash
+cp androidApp/keystore.properties.example androidApp/keystore.properties
+# 然后填入 storeFile / storePassword / keyAlias / keyPassword
+```
+
+两条刻意的行为约定：
+
+- **没有** `keystore.properties` → 构建照常跑通，产物是 `-unsigned.apk`。
+  这样 clone 下来的人与没配密钥的 CI 都能出包。
+- **有** `keystore.properties` 但密钥库文件找不到 → 构建**直接失败**。
+  不做静默降级：一个「看着正常、其实没签名」的 release 包，
+  只有在用户安装时才会暴露问题，代价比构建失败大得多。
+
+签名方案是 v2 + v3（v1 已关）。**v3 别关** —— 它带密钥轮换信息，
+是将来万一要换签名密钥时唯一的退路。
+
+签完可以用 Android SDK 的 `apksigner` 核对：
+
+```bash
+"$ANDROID_HOME/build-tools/<版本>/apksigner" verify --verbose --print-certs \
+    androidApp/build/outputs/apk/release/androidApp-release.apk
 ```
 
 凭据提供程序是原生组件，走独立的构建脚本（需要 VS 的「使用 C++ 的桌面开发」工作负载）：

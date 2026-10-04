@@ -21,6 +21,14 @@ local.properties
 *.apk
 *.aab
 
+# 发布签名：密钥库与凭据一律不入库
+# 注意 keystore.properties 必须在 .gitignore 之后再创建，顺序反了就会漏提交一次
+keystore.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+
 # 会话本地记忆（个人工作日志，不属于工程内容）
 # 注意：不要整目录忽略 —— .workbuddy/skills/ 是要跟团队共享的项目级技能
 .workbuddy/memory/
