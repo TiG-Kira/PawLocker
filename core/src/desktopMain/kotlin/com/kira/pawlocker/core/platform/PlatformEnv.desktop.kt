@@ -68,24 +68,33 @@ actual object PlatformEnv {
     actual fun currentTimeMillis(): Long = System.currentTimeMillis()
 
     /**
-     * 枚举本机 IPv4 地址。
+     * 枚举本机 IPv4 地址，用作「局域网直连」候选下发给手机。
      *
-     * 会过滤掉回环、虚拟网卡与 APIPA（169.254.x.x）—— 后者出现说明 DHCP 没拿到地址，
-     * 把它下发给手机只会让连接尝试白白多花几秒超时。
-     * Tailscale / ZeroTier 的虚拟网卡**保留**，它们正是「虚拟组网」通道要用的地址。
+     * 过滤规则全部集中在 [LanAddressPolicy.isAdvertisable] 里 ——
+     * 这段逻辑出错的代价是「手机连到一个永远连不通的地址，卡到超时才换下一个」，
+     * 用户看到的现象就是「扫码之后没反应」，而且两端都没有任何错误提示，
+     * 属于必须能在单测里复现的那类问题。
      */
     actual fun localIpv4Addresses(): List<String> = try {
         java.net.NetworkInterface.getNetworkInterfaces().toList()
             .filter { it.isUp && !it.isLoopback }
             .flatMap { nic -> nic.inetAddresses.toList().map { nic to it } }
-            .filter { (_, address) ->
+            .filter { (nic, address) ->
                 address is java.net.Inet4Address &&
                     !address.isLoopbackAddress &&
-                    !address.isLinkLocalAddress
+                    !address.isLinkLocalAddress &&
+                    LanAddressPolicy.isAdvertisable(
+                        networkInterfaceName = nic.name,
+                        displayName = nic.displayName,
+                        isVirtual = nic.isVirtual,
+                        hostAddress = address.hostAddress.orEmpty(),
+                    )
             }
             .map { (_, address) -> address.hostAddress.orEmpty().substringBefore('%') }
             .filter { it.isNotBlank() }
-            .distinct()
+            .distinctBy { it }
+            // 优先级高的排前面，手机就按这个顺序试
+            .sortedWith(compareBy { LanAddressPolicy.advertisabilityRank(it) })
     } catch (error: Throwable) {
         log("PlatformEnv", "枚举本机地址失败: ${error.message}")
         emptyList()

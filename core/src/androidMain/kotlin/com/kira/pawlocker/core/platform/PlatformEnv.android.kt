@@ -45,14 +45,29 @@ actual object PlatformEnv {
 
     actual fun currentTimeMillis(): Long = System.currentTimeMillis()
 
+    /**
+     * 枚举本机 IPv4。手机侧主要用来在设置页显示自己的地址，
+     * 过滤规则与 Windows 侧共用 [LanAddressPolicy]，避免两端说法不一致。
+     */
     actual fun localIpv4Addresses(): List<String> = try {
         java.net.NetworkInterface.getNetworkInterfaces().toList()
-            .filter { it.isUp && !it.isLoopback && !it.isVirtual }
-            .flatMap { nic -> nic.inetAddresses.toList().map { nic.name to it } }
-            .filter { (_, address) -> address is java.net.Inet4Address && !address.isLoopbackAddress }
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { nic -> nic.inetAddresses.toList().map { nic to it } }
+            .filter { (nic, address) ->
+                address is java.net.Inet4Address &&
+                    !address.isLoopbackAddress &&
+                    !address.isLinkLocalAddress &&
+                    LanAddressPolicy.isAdvertisable(
+                        networkInterfaceName = nic.name,
+                        displayName = nic.name,
+                        isVirtual = nic.isVirtual,
+                        hostAddress = address.hostAddress.orEmpty(),
+                    )
+            }
             .map { (_, address) -> address.hostAddress.orEmpty().substringBefore('%') }
             .filter { it.isNotBlank() }
             .distinct()
+            .sortedWith(compareBy { LanAddressPolicy.advertisabilityRank(it) })
     } catch (error: Throwable) {
         emptyList()
     }

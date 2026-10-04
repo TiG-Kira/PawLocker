@@ -138,6 +138,7 @@ fun DeviceListScreen(
                             record = record,
                             isUnlocking = controller.unlockingDeviceId == record.deviceId,
                             unlockingStage = controller.unlockingStage,
+                            liveProgress = controller.liveProgress,
                             onUnlock = { controller.unlock(record) },
                             onDetails = { onOpenDevice(record) },
                             onForget = { pendingForget = record },
@@ -254,6 +255,7 @@ private fun ComputerCard(
     record: TrustRecord,
     isUnlocking: Boolean,
     unlockingStage: UnlockStage,
+    liveProgress: String?,
     onUnlock: () -> Unit,
     onDetails: () -> Unit,
     onForget: () -> Unit,
@@ -317,6 +319,10 @@ private fun ComputerCard(
                         text = when {
                             !isUnlocking -> "解锁"
                             unlockingStage == UnlockStage.VerifyingIdentity -> "验证身份…"
+                            // 有地址在试就报地址，否则才是笼统的「发送指令…」。
+                            // 候选里混一个连不通的地址时，TCP 超时可以等十几秒，
+                            // 按钮上不显示在连哪里，那段时间就完全是黑箱。
+                            liveProgress != null -> liveProgress
                             else -> "发送指令…"
                         },
                     )

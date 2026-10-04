@@ -64,6 +64,10 @@ fun PairingScreen(
     var mode by remember { mutableStateOf(PairingMode.Scan) }
     val busy = controller.pairingStage == PairingStage.InProgress
 
+    // 配对成功与否都在本页出结果，不指望用户自己切回设备页去看 ——
+    // 配对失败时用户还停在这一页，如果只有设备页显示原因，观感就是「点了一下，什么都没发生」。
+    val message = controller.lastMessage
+
     Scaffold(
         topBar = {
             SmallTopAppBar(
@@ -91,6 +95,8 @@ fun PairingScreen(
                 )
 
                 when (mode) {
+                    // 扫码成功后不切模式：`busy` 会让取景区自动换成「正在配对」，
+                    // 弹窗则在配对结束时给出结果。切走反而让用户以为跳错页了。
                     PairingMode.Scan -> ScanPane(
                         enabled = !busy,
                         onDecoded = { raw -> controller.pairFromDeepLink(raw) },
@@ -101,7 +107,24 @@ fun PairingScreen(
             }
 
             if (busy) {
-                PairingBusyOverlay()
+                PairingBusyOverlay(controller.liveProgress)
+            }
+        }
+    }
+
+    if (message != null) {
+        OverlayDialog(
+            title = message.title,
+            summary = message.detail,
+            show = true,
+            onDismissRequest = { controller.clearMessage() },
+        ) {
+            Button(
+                onClick = { controller.clearMessage() },
+                colors = ButtonDefaults.buttonColorsPrimary(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("知道了")
             }
         }
     }
@@ -331,12 +354,20 @@ private fun ManualPane(
 /**
  * 配对进行中的遮罩。
  * 不做成阻塞式对话框 —— 用户可能需要在这几秒里看一眼电脑屏幕上的提示。
+ *
+ * [progress] 是当前正在尝试的地址。候选里混进一个连不通的地址时，
+ * 单次 `connect()` 就要等到 TCP 超时；把这行字摆出来，
+ * 用户至少知道程序在动，而不是以为卡死了。
  */
 @Composable
-private fun PairingBusyOverlay() {
+private fun PairingBusyOverlay(progress: String?) {
     OverlayDialog(
         title = "正在配对",
-        summary = "已向电脑发送配对请求。如果电脑上弹出了确认框，请在电脑上点「允许」。",
+        summary = if (progress != null) {
+            "$progress\n\n连上之后，如果电脑上弹出了确认框，请在电脑上点「允许」。"
+        } else {
+            "已向电脑发送配对请求。如果电脑上弹出了确认框，请在电脑上点「允许」。"
+        },
         show = true,
         onDismissRequest = null,
     ) {

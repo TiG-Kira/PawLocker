@@ -213,7 +213,7 @@ tools/check-runtime-modules.sh
 # 只编译，不打包
 ./gradlew :core:compileKotlinDesktop :ui:compileKotlinDesktop :windowsApp:compileKotlin
 
-# 单元测试（259 个用例）
+# 单元测试（270 个用例）
 ./gradlew :core:desktopTest
 ```
 
@@ -354,7 +354,7 @@ credential-provider\sign.bat verify    rem Successfully verified
 
 compilable and testable 的部分都已完成并**通过编译与单元测试**：
 
-- core 层：密码学、协议、配对、解锁、防重放、三元绑定链 —— 259 个用例全绿
+- core 层：密码学、协议、配对、解锁、防重放、三元绑定链、局域网地址过滤 —— 270 个用例全绿
 - 两端界面（Miuix）：设备页、配对页、管理页、设置页、首次启动向导
 - **原生凭据提供程序**：能出现在锁屏、挂进 Winlogon 登录流程，收到授权后自动提交
   （`ICredentialProvider` / `ICredentialProviderCredential2` / `ICredentialProviderSetUserArray`）

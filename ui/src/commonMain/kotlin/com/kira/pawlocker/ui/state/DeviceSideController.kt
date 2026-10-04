@@ -125,7 +125,13 @@ class DeviceSideController(
             }
 
             unlockingStage = UnlockStage.SendingCommand
-            when (val result = client.unlock(record)) {
+            liveProgress = null
+            val result = try {
+                client.unlock(record, onProgress = ::onEndpointProgress)
+            } finally {
+                liveProgress = null
+            }
+            when (result) {
                 is UnlockAttemptResult.Success -> {
                     trustStore.upsert(result.updatedRecord)
                     refresh()
@@ -179,8 +185,26 @@ class DeviceSideController(
     var pairingStage: PairingStage by mutableStateOf(PairingStage.Idle)
         private set
 
+    /**
+     * 配对/解锁过程中正在尝试的地址文案，例如「正在尝试 192.168.31.253:28900（1/2）」。
+     *
+     * 候选地址里只要有一个连不通，一次 `connect()` 就要等到 TCP 超时。
+     * 没有这条提示的话，那段等待在用户眼里就是「点了没反应」。
+     */
+    var liveProgress: String? by mutableStateOf(null)
+        private set
+
     fun updateManualPairing(transform: (ManualPairingDraft) -> ManualPairingDraft) {
         manualPairing = transform(manualPairing)
+    }
+
+    /** 由 [LockerClient] 的进度回调驱动，转成一句人能读的话。 */
+    private fun onEndpointProgress(endpoint: Endpoint, index: Int, total: Int) {
+        liveProgress = if (total <= 1) {
+            "正在连接 ${endpoint.display}"
+        } else {
+            "正在尝试 ${endpoint.display}（${index + 1}/$total）"
+        }
     }
 
     /** 扫码得到的深链，直接进入配对。 */
@@ -219,6 +243,7 @@ class DeviceSideController(
         }
 
         pairingStage = PairingStage.InProgress
+        liveProgress = null
         scope.launch {
             val endpoint = Endpoint(
                 kind = draft.transportKind,
@@ -226,14 +251,27 @@ class DeviceSideController(
                 port = port,
                 label = "手动配置",
             )
-            handlePairResult(client.pairManually(endpoint, draft.code, PlatformEnv.currentTimeMillis()))
+            try {
+                handlePairResult(
+                    client.pairManually(endpoint, draft.code, PlatformEnv.currentTimeMillis(), ::onEndpointProgress),
+                )
+            } finally {
+                liveProgress = null
+            }
         }
     }
 
     private fun startPairing(offer: PairingOffer, code: String) {
         pairingStage = PairingStage.InProgress
+        liveProgress = null
         scope.launch {
-            handlePairResult(client.pair(offer, code, PlatformEnv.currentTimeMillis()))
+            try {
+                handlePairResult(
+                    client.pair(offer, code, PlatformEnv.currentTimeMillis(), ::onEndpointProgress),
+                )
+            } finally {
+                liveProgress = null
+            }
         }
     }
 
@@ -360,13 +398,26 @@ sealed interface UiMessage {
 internal fun friendlyReason(code: String, raw: String): String = when (code) {
     ErrorCodes.DEVICE_NOT_TRUSTED -> "这台电脑上已经没有你的配对记录了，请在电脑管理页重新配对"
     ErrorCodes.DEVICE_REVOKED -> "你已被这台电脑移除信任，请重新配对"
-    ErrorCodes.PAIRING_CLOSED -> "电脑端还没打开配对窗口，请先在电脑上点「添加手机」"
-    ErrorCodes.PAIRING_EXPIRED -> "配对码过期了，请在电脑上重新生成"
+
+    // 下面两条是配对阶段最常见的失败，而且**症状都是「电脑没反应」**。
+    // 不说清楚的话，用户只会反复点「添加手机」，而真正的原因是码已经过期。
+    ErrorCodes.PAIRING_CLOSED ->
+        "电脑端没有可用的配对窗口。请在电脑上点「添加手机」重新生成"
+    ErrorCodes.PAIRING_EXPIRED ->
+        "配对码只有 2 分钟有效期，已经过期了。请在电脑上点「添加手机」重新生成，" +
+            "然后立刻用新码配对"
+
     ErrorCodes.PAIRING_CODE_MISMATCH -> "配对码不对，请核对电脑屏幕上显示的 6 位数字"
+    ErrorCodes.USER_MISMATCH ->
+        "这台手机是为另一个 Windows 账户配对的。请用当前登录的账户重新配对"
     ErrorCodes.CLOCK_SKEW -> "手机与电脑的时间差太大，请检查两端时间是否同步"
     ErrorCodes.REPLAY_DETECTED -> "指令被判定为重复，请重试"
     ErrorCodes.RATE_LIMITED -> "尝试太频繁了，等一会儿再试"
     ErrorCodes.VERSION_MISMATCH -> "两端版本不一致，请把 App 升级到同一版本"
     ErrorCodes.BAD_SIGNATURE -> "凭据校验失败，建议在电脑端删除本机后重新配对"
+
+    // 握手阶段没有拿到 ServerHello 时走这里，最常见的原因就是地址/端口不对。
+    ErrorCodes.INTERNAL -> raw.ifBlank { "连接已建立但握手失败，请确认两端版本一致" }
+
     else -> raw
 }

@@ -52,6 +52,7 @@ class LockerClient(
         offer: PairingOffer,
         code: String,
         now: Long = PlatformEnv.currentTimeMillis(),
+        onProgress: ((Endpoint, Int, Int) -> Unit)? = null,
     ): PairAttemptResult {
         if (offer.v != Protocol.VERSION) {
             return PairAttemptResult.Rejected(
@@ -64,7 +65,7 @@ class LockerClient(
         }
 
         val attempts = mutableListOf<EndpointAttempt>()
-        val connected = connectFirst(offer.endpoints, attempts)
+        val connected = connectFirst(offer.endpoints, attempts, onProgress)
             ?: return PairAttemptResult.Unreachable(UNREACHABLE_HINT, attempts)
 
         return try {
@@ -118,9 +119,10 @@ class LockerClient(
         endpoint: Endpoint,
         code: String,
         now: Long = PlatformEnv.currentTimeMillis(),
+        onProgress: ((Endpoint, Int, Int) -> Unit)? = null,
     ): PairAttemptResult {
         val attempts = mutableListOf<EndpointAttempt>()
-        val connected = connectFirst(listOf(endpoint), attempts)
+        val connected = connectFirst(listOf(endpoint), attempts, onProgress)
             ?: return PairAttemptResult.Unreachable(UNREACHABLE_HINT, attempts)
 
         return try {
@@ -222,12 +224,13 @@ class LockerClient(
         record: TrustRecord,
         action: String = UnlockAction.UNLOCK,
         now: Long = PlatformEnv.currentTimeMillis(),
+        onProgress: ((Endpoint, Int, Int) -> Unit)? = null,
     ): UnlockAttemptResult {
         val secret = record.resolveSecret()
         val counter = record.lastCounter + 1
 
         val attempts = mutableListOf<EndpointAttempt>()
-        val connected = connectFirst(record.endpoints, attempts)
+        val connected = connectFirst(record.endpoints, attempts, onProgress)
             ?: return UnlockAttemptResult.Unreachable(
                 "找不到这台电脑。可能不在同一网络，或内网穿透已断开。",
                 attempts,
@@ -368,13 +371,22 @@ class LockerClient(
      * 按优先级依次尝试所有地址。
      * 只有「连不上」才换下一个；一旦 TCP 连上就认定该地址可用，
      * 后续失败属于协议层问题，换地址也没用。
+     *
+     * [onProgress] 会在每次尝试前回调，UI 用来显示「正在尝试 192.168.1.10:28900…」。
+     *
+     * 这个回调不是锦上添花：候选列表里只要混进一个连不通的地址，
+     * 一次 `connect()` 就要等到 TCP 超时（十几秒到一分钟不等），
+     * 而这期间界面如果什么都不显示，用户看到的就是「点了没反应」。
      */
     private suspend fun connectFirst(
         endpoints: List<Endpoint>,
         attempts: MutableList<EndpointAttempt>,
+        onProgress: ((Endpoint, Int, Int) -> Unit)? = null,
     ): Connected? {
         if (endpoints.isEmpty()) return null
-        for (endpoint in ordered(endpoints)) {
+        val orderedEndpoints = ordered(endpoints)
+        orderedEndpoints.forEachIndexed { index, endpoint ->
+            onProgress?.invoke(endpoint, index, orderedEndpoints.size)
             try {
                 val connection = Transport.connect(endpoint)
                 attempts += EndpointAttempt(endpoint, success = true, detail = "已连接")

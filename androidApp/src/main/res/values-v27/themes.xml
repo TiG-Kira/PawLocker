@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      API 27+ 追加：刘海屏 / 圆角屏区域也把内容画出来。
+
+      单独放 values-v27 的原因：`windowLayoutInDisplayCutoutMode` 这个属性
+      在 API 26 上不存在，写在 values/ 里会被 Lint 判成 NewApi 错误，
+      而 lint 失败会直接**卡住 release 打包**。按版本目录分文件是 Android
+      处理「高版本专有属性」的标准做法 —— 旧版本系统根本不读这个文件。
+
+      覆盖而非继承：资源系统按「最具体的目录」整份替换同名 style，
+      所以这里必须把 Theme.PawLocker 的全部 item 重新写一遍。
+    -->
+    <style name="Theme.PawLocker" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>

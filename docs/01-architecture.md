@@ -176,7 +176,24 @@ androidApp:MainActivity (FragmentActivity)
 - 单 Activity + 状态驱动导航。屏幕轮转时状态量很小（一个设备列表 + 一个操作进度），
   重新从 `TrustStore` 读一次即可，没有需要跨配置变更保留的复杂中间态
 - **`FragmentActivity` 是硬性要求**，`BiometricPrompt` 的构造函数只接受它
-- 相机权限**按需申请**：只有进入配对页的扫码模式才申请，不在启动时索取
+- **相机权限必须在运行时申请**，清单里声明 `android.permission.CAMERA` 是不够的 ——
+  API 23 起系统会直接拒绝未申请的访问，CameraX 抛 `SecurityException`，
+  表现是「扫码页一片黑、扫半天没反应」。
+
+  实现在 `QrScanView.android.kt`：用 `rememberLauncherForActivityResult`
+  在进入扫码模式时申请，没拿到权限就渲染带「授予相机权限 / 去系统设置」
+  按钮的替代表面，**不给一块黑屏让用户干等**。
+
+  > 这里踩过的坑：最早 `runCatching { ... }` 把 `SecurityException` 整个吞掉，
+  > 于是权限被拒与相机正常工作的表现完全一样 —— 都是黑屏、都没有提示。
+  > 相机绑定的失败原因现在会映射成人话显示出来，不再静默。
+
+- **配对结果在配对页当场出**。`DeviceSideController.lastMessage` 原本只在
+  设备页和设置页消费，配对失败时用户停在配对页看不到任何原因，
+  观感就是「点了没反应」。现在 `PairingScreen` 自己也消费它。
+- **连接过程可见**。候选地址里只要混进一个连不通的地址，一次 `connect()`
+  就要等到 TCP 超时。`LockerClient.connectFirst` 带 `onProgress` 回调，
+  界面实时显示「正在尝试 192.168.31.253:28900（1/2）」。
 
 ---
 
