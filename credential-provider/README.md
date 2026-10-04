@@ -114,8 +114,16 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{6F3A1C48-...}
 2. **只在收到事件后提交，不做任何其他触发。** 不要监听网络、不要读文件。
 3. **磁贴标记为「需要用户在场」** 时不要用 —— 本场景下用户不在场，
    但这也意味着**手机侧的生物识别必须真的开启**，它是唯一的「人证」环节。
-4. **DLL 必须被签名**，否则在启用 Secure Boot 的机器上
-   无法进入锁屏界面（Winlogon 只加载受信任的模块）。
+4. **DLL 应当被签名。** Windows 本身**不强制**凭据提供程序做 Authenticode
+   签名 —— 注册表指到哪个 DLL 它就加载哪个。但未签名的 DLL 会被下面这些拦住：
+
+   - **WDAC / AppLocker / Device Guard** 策略（受管机器基本都开）
+   - **Smart App Control**（Windows 11 22H2 起默认对新装的未签名二进制生效）
+   - 大多数 **EDR** 产品
+
+   签名同时是**发现 DLL 被替换**的唯一手段：`C:\Program Files` 的 ACL
+   挡得住普通用户改文件，但挡不住管理员改文件 —— 而 ACL 不是完整性。
+   做法见 [§6](#6-代码签名)。
 5. **不要复制 DLL 到系统目录**。JVM 侧的注册逻辑刻意只写注册表、
    不搬运文件 —— 往系统目录放文件应该是用户的决定。
 
@@ -231,14 +239,92 @@ credential-provider\build.bat
 构建完成后，在 PawLocker 的**首次启动向导**或**设置 — 解锁方式**里选择
 「凭据提供程序」，向导会自动检测 DLL 与注册状态，并在你点击时弹 UAC 完成注册。
 
-> ⚠️ **DLL 需要代码签名**才能在启用 Secure Boot 的机器上进入锁屏界面 ——
-> Winlogon 只加载受信任的模块。开发和自用环境可以先跳过，
-> 但对外分发必须签名。
+> ⚠️ **DLL 应当做代码签名**，见下一节。Windows 不会因为「没签名」就拒绝加载，
+> 但在启用了 WDAC / AppLocker / Smart App Control 的机器上会被拦下，
+> 而这些策略在受管环境里几乎是默认的。
 
 
 ---
 
-## 6. 与其他解锁策略的关系
+## 6. 代码签名
+
+### 6.1 Windows 到底要不要求签名
+
+**不要求。** 凭据提供程序是普通的 COM 进程内服务器：`HKLM` 下注册表指向
+哪个 DLL，LogonUI 就加载哪个。签名与否不影响加载本身。
+
+那为什么还是要签：
+
+| 场景 | 未签名的后果 |
+|---|---|
+| WDAC / AppLocker / Device Guard | DLL 直接被拒绝加载，锁屏上没有磁贴 |
+| Smart App Control（Win11 22H2+） | 同上 |
+| EDR / 杀软 | 常见启发式拦截：往 SYSTEM 进程里加载未签名模块 |
+| 供应链 | **无法察觉 DLL 被替换** —— `C:\Program Files` 的 ACL 只挡普通用户 |
+| 分发 | 用户看到的是一堆「未知发布者」警告 |
+
+所以签名解决的是「**能不能加载**」和「**有没有被换掉**」两件事，
+而不是「能不能通信」。
+
+### 6.2 用哪张证书
+
+| 证书 | 能做什么 | 代价 |
+|---|---|---|
+| 自签名开发证书 | 本机 sign → verify → 加载全流程自测 | 对别人零可信度，过不了 SmartScreen |
+| 由 CA 签发的 OV 代码签名证书 | 受管环境里的 WDAC 白名单可以按发布者放行 | 需要实名审核，年费 |
+| **EV 代码签名证书** / Azure Trusted Signing | 直接获得 SmartScreen 信誉，无需等待累积 | 更贵，或绑定云订阅 |
+
+自签名证书**永远**过不了 SmartScreen，也不会被别人的 WDAC 策略接受 ——
+它只适合自用与开发验证。
+
+### 6.3 本仓库的做法
+
+```bat
+rem 1. 造一张开发证书（放进 Cert:\CurrentUser\My，私钥默认不可导出）
+credential-provider\sign.bat devcert
+
+rem 2. 签名（/fd SHA256，并用 DigiCert 的 RFC 3161 服务打时间戳）
+credential-provider\sign.bat sign
+
+rem 3. 本机信任这张证书 —— 会弹 UAC
+credential-provider\sign.bat trust
+
+rem 4. 验证
+credential-provider\sign.bat verify
+rem → Successfully verified，SHA256 + RFC3161
+
+rem 撤销信任
+credential-provider\sign.bat untrust
+```
+
+用真实的 CA / EV 证书时，换成按指纹签名即可：
+
+```bat
+credential-provider\sign.bat cert <证书指纹>
+rem 指纹可用 certutil -user -store My 查看
+```
+
+几个不显眼但会咬人的细节：
+
+- **信任必须装在 `LocalMachine`，不是 `CurrentUser`。**
+  DLL 跑在 LogonUI 里，也就是 SYSTEM 上下文；SYSTEM 有自己的一套证书存储，
+  看不到当前用户的。装错位置的现象是「提权窗口里 `verify` 通过，
+  锁屏上依然没有磁贴」。`sign.bat trust` 装的就是 `LocalMachine`。
+- **一定要打时间戳。** 证书过期之后，没有时间戳的签名会一起失效；
+  有时间戳则签名在证书有效期内永久有效。
+- **私钥默认不可导出。** `dev-cert.ps1` 用 `NonExportable` 创建证书 ——
+  签名密钥留在证书存储里就够了，没有必要能拷走。
+  确实要挪到构建服务器上时，加 `-Exportable` 显式重建。
+- **`sign.bat` 与 `dev-cert.ps1` 是纯 ASCII 的。** `cmd.exe` 按 OEM 代码页
+  解析批处理文件，PowerShell 5.1 对无 BOM 的 UTF-8 也按 ANSI 处理 ——
+  中文注释在 `.kt` 里没问题，在这两个文件里会变成乱码，甚至破坏解析。
+- 签名后**不要重新构建**。任何字节改动会让签名失效，`verify` 会报
+  「哈希不匹配」。正确的顺序永远是 build → sign → verify。
+
+
+---
+
+## 7. 与其他解锁策略的关系
 
 PawLocker 提供四条解锁策略（见 `docs/01-architecture.md` §5），
 只有本目录对应的策略需要额外的原生产物：

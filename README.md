@@ -32,7 +32,10 @@ ui/            Miuix 界面层，Android 与 Desktop 共用一套 Composable
 androidApp/    Android 应用壳
 windowsApp/    Windows 桌面应用（jpackage / MSI）
 
-credential-provider/   Windows 凭据提供程序的接口契约（需 MSVC 单独构建）
+credential-provider/   Windows 凭据提供程序（C++17，需 MSVC 单独构建）
+  include/     与 Kotlin 侧共用的契约（CLSID / 事件名 / 管道名 / 凭据块格式）
+  src/         ICredentialProvider 实现、具名事件看门狗、命名管道取凭据
+  build.bat    vswhere + vcvars64 + cl，不依赖 CMake
 
 docs/
   01-architecture.md       总体架构、进程模型、Windows 登录集成三条路径
@@ -59,14 +62,39 @@ JDK 8+ 内置、Android API 26 起全量覆盖 —— 三端都不需要额外�
 把双方公钥绑进受配对码保护的 HMAC —— 中间人必须同时伪造公钥和配对码才能通过。  
 配对之后两端还会显示同一组 emoji（SAS），供肉眼二次确认。
 
-**解锁三层防护**：
+**解锁四层防护**：
 
 1. ECDSA 签名 —— 来源认证
-2. 时间戳 + 单调计数器 + nonce —— 新鲜性，挡重放
-3. AES-256-GCM —— 机密性，AAD 覆盖元数据
+2. **绑定链核对** —— 目标 Windows 账户必须是本机当前账户
+3. 时间戳 + 单调计数器 + nonce —— 新鲜性，挡重放
+4. AES-256-GCM —— 机密性，AAD 覆盖元数据
 
 签名覆盖密文（encrypt-then-sign），AAD 覆盖  
-`version | deviceId | counter | requestedAt | nonce`。
+`version | deviceId | targetUserSid | counter | requestedAt | nonce`。
+
+### 三元绑定链：设备 + Windows 账户 + 手机
+
+信任链上串着三样东西，**任何一环对不上都不解锁**：
+
+```
+[电脑设备] ──── [Windows 账户] ──── [手机设备]
+```
+
+少了中间那一环会出这种事：家里电脑上有「Kira」和「孩子」两个账户，  
+给「Kira」配对的手机会把「孩子」的账户一起解开 —— 因为信任记录只绑了设备。
+
+账户因此出现在四个地方，层层递进：
+
+| 位置 | 作用 |
+| --- | --- |
+| HKDF 的 salt | 为账户 A 派生的密钥在**密码学上**解不开账户 B 的指令，不依赖任何一方的自觉检查 |
+| `PairingOffer` / `ServerHello` | 手机明确知道自己配的是哪个账户；用户能看到「正在与 书房主机 · Kira（S-1-5-21-…）配对」 |
+| `PairRequest` / `PairResponse` | 配对窗口期内账户被切换过就中止，不会记下错绑定 |
+| `UnlockRequest.targetUserSid` | 进 AAD 与签名，电脑端拿本机**真实**账户比对；对不上整条拒绝，且**不消耗**防重放计数额度 |
+
+账户标识用 SID（`S-1-5-21-…-RID`，改账户名也不变）而不是账户名；  
+极小概率取不到 SID 时退化为 `name:<账户名>`，前缀保证两种形态永远不会意外相等。  
+取不到账户名则绑定键为 `name:`，它匹配不上任何正常账户 —— 只会拒绝，不会误开。
 
 详见 [docs/02-crypto-and-pairing.md](docs/02-crypto-and-pairing.md)。
 
@@ -107,14 +135,30 @@ frp 的 `frpc.toml` 由程序自动生成，不内置 `frpc.exe` ——
 
 ### 解锁策略
 
-| 策略                    | 能做到什么      | 需要什么                               |
-| --------------------- | ---------- | ---------------------------------- |
-| `CREDENTIAL_PROVIDER` | **真正完成登录** | `PawLockerProvider.dll`（需 MSVC 构建） |
-| `WAKE_ONLY`           | 只点亮显示器     | 无                                  |
-| `CUSTOM_COMMAND`      | 执行自定义命令    | 无                                  |
-| `DRY_RUN`             | 只记日志，零系统影响 | 无                                  |
+| 策略                    | 能做到什么      | 需要什么                                          |
+| --------------------- | ---------- | --------------------------------------------- |
+| `CREDENTIAL_PROVIDER` | **真正完成登录** | `PawLockerProvider.dll`（已实现，需本机用 MSVC 构建一次） |
+| `WAKE_ONLY`           | 只点亮显示器     | 无                                             |
+| `CUSTOM_COMMAND`      | 执行自定义命令    | 无                                             |
+| `DRY_RUN`             | 只记日志，零系统影响 | 无                                             |
 
 后三条开箱即用。
+
+### 凭据是怎么送到锁屏的
+
+DLL 跑在 LogonUI（SYSTEM 上下文）里，解不开 `%APPDATA%` 下那份**用户作用域**的 DPAPI 密文；  
+换成机器作用域能让它解开，代价是同机任何进程都能解开 —— 对远程解锁来说不可接受。
+
+所以走**现投**，顺序不能换：
+
+```
+1. 主程序 CreateNamedPipe     ← 先把管道挂起来
+2. 主程序 SetEvent            ← 再叫醒 DLL
+3. DLL CreateFile 连上，取凭据  ← 取到即用，写完立刻清零
+```
+
+先建管道再置事件是必须的，反过来会出现「DLL 被叫醒了但管道还不存在」的竞态。  
+结果是**磁盘上永远不存在一份机器可解的密码副本**。
 
 > **为什么锁屏不能直接注入按键**：锁屏界面跑在独立的安全桌面上，  
 > 普通进程的 `SendInput` 会被系统丢弃。要真正完成登录，  
@@ -137,7 +181,37 @@ frp 的 `frpc.toml` 由程序自动生成，不内置 `frpc.exe` ——
 
 # 只编译，不打包
 ./gradlew :core:compileKotlinDesktop :ui:compileKotlinDesktop :windowsApp:compileKotlin
+
+# 单元测试（216 个用例）
+./gradlew :core:desktopTest
 ```
+
+凭据提供程序是原生组件，走独立的构建脚本（需要 VS 的「使用 C++ 的桌面开发」工作负载）：
+
+```bat
+credential-provider\build.bat
+rem → credential-provider\build\PawLockerProvider.dll
+```
+
+### 代码签名
+
+Windows **不强制**凭据提供程序签名，但未签名的 DLL 会被 WDAC / AppLocker /
+Smart App Control 拦在锁屏之外，而且签名是发现「DLL 被替换」的唯一手段。
+
+```bat
+credential-provider\sign.bat devcert   rem 造一张自签名开发证书（私钥不可导出）
+credential-provider\sign.bat sign      rem SHA256 + RFC3161 时间戳
+credential-provider\sign.bat trust     rem 装进 LocalMachine 信任（弹 UAC）
+credential-provider\sign.bat verify    rem Successfully verified
+```
+
+> 信任必须装在 **`LocalMachine`** 而不是 `CurrentUser`：DLL 跑在 LogonUI，
+> 也就是 SYSTEM 上下文，看不到当前用户的证书存储。
+> 装错地方的现象是「提权窗口里校验通过、锁屏上依然没磁贴」。
+
+自签名证书只适合自用验证，过不了 SmartScreen；对外分发需要 CA / EV 证书，
+用 `sign.bat cert <指纹>` 换证书即可。细节见
+[credential-provider/README.md §6](credential-provider/README.md#6-代码签名)。
 
 ## 文档
 
@@ -149,11 +223,18 @@ frp 的 `frpc.toml` 由程序自动生成，不内置 `frpc.exe` ——
 
 ## 状态
 
-工程骨架、core 层、两端界面均已实现并**通过编译**。  
+compilable and testable 的部分都已完成并**通过编译与单元测试**：
+
+- core 层：密码学、协议、配对、解锁、防重放、三元绑定链 —— 216 个用例全绿
+- 两端界面（Miuix）：设备页、配对页、管理页、设置页、首次启动向导
+- **原生凭据提供程序**：能出现在锁屏、挂进 Winlogon 登录流程，收到授权后自动提交
+  （`ICredentialProvider` / `ICredentialProviderCredential2` / `ICredentialProviderSetUserArray`）
+- 凭据投递通道：命名管道现投，磁盘上不留机器可解副本
+
 尚未做的：
 
-- Windows 凭据提供程序（`PawLockerProvider.dll`）的原生实现 —— 契约已定，代码待写
-- 单元测试（`core` 的密码学与协议部分已按可测试的方式分层）
+- **真机端到端验证** —— 目前只过了编译器与单元测试，从未在真实锁屏上跑过一轮完整解锁
+- DLL 代码签名 —— 未经签名的凭据提供程序在部分策略下会被拒绝加载
 - 托盘常驻与「关掉窗口仍继续服务」—— 需要把 `LockerServer` 挪进 Windows 服务
 
 ## 许可证
