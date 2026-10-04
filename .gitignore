@@ -43,3 +43,8 @@ keystore.properties
 # 链接中间产物（正常情况下会被 /IMPLIB 收进 build/）
 /credential-provider/*.lib
 /credential-provider/*.exp
+
+# 打包资源目录里的 DLL：由 credential-provider 构建产出，构建时拷入。
+# 它是二进制构建产物，不入库 —— 仓库里的源码 + 签名脚本才是唯一来源。
+# 保留目录本身（其中的 .gitkeep 会入库），避免首次 clone 时 Gradle 找不到路径。
+/windowsApp/resources/windows/*.dll

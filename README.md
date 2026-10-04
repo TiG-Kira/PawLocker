@@ -213,7 +213,7 @@ tools/check-runtime-modules.sh
 # 只编译，不打包
 ./gradlew :core:compileKotlinDesktop :ui:compileKotlinDesktop :windowsApp:compileKotlin
 
-# 单元测试（250 个用例）
+# 单元测试（259 个用例）
 ./gradlew :core:desktopTest
 ```
 
@@ -299,6 +299,25 @@ credential-provider\build.bat
 rem → credential-provider\build\PawLockerProvider.dll
 ```
 
+**DLL 会被自动打进去，不用手动拷。** `:windowsApp:packageMsi` 依赖一个
+`stageCredentialProviderDll` 任务，把上面那个构建产物放进
+`windowsApp/resources/windows/`，再由 Compose 的 `appResourcesRootDir`
+带进安装包。
+
+顺序不能颠倒：**先 `build.bat`（和 `sign.bat sign`），再 `packageMsi`。**
+DLL 不在位时打包会直接失败 —— 刻意不留「找不到就跳过」的后路，
+否则会产出一个装完之后锁屏上什么都没有的安装包，
+而这个问题只在用户登录那一刻才暴露。
+
+DLL 本身**不入版本库**（二进制构建产物，入库会让「仓库里的文件」和
+「源码 + 签名」脱节）。它从构建目录取，源码 + 签名脚本才是唯一来源。
+
+> **路径为什么不硬编码。** 打进去之后 DLL 落在
+> `<安装根>\app\resources\PawLockerProvider.dll` —— jpackage 的固定布局，
+> 不是安装根目录。程序运行时读 `compose.application.resources.dir`
+> 这个系统属性（jpackage 写进 `PawLocker.cfg` 的 `[JavaOptions]`）来定位它，
+> 所以装到哪个盘、哪个目录都不影响。
+
 ### 代码签名
 
 Windows **不强制**凭据提供程序签名，但未签名的 DLL 会被 WDAC / AppLocker /
@@ -314,6 +333,10 @@ credential-provider\sign.bat verify    rem Successfully verified
 > 信任必须装在 **`LocalMachine`** 而不是 `CurrentUser`：DLL 跑在 LogonUI，
 > 也就是 SYSTEM 上下文，看不到当前用户的证书存储。
 > 装错地方的现象是「提权窗口里校验通过、锁屏上依然没磁贴」。
+
+`trust` 这一步在应用里也能做 —— 首次启动向导会发现「DLL 已签名但证书不受信任」
+并给出「信任这张证书」按钮，证书直接从 DLL 的签名里现取，
+不需要你去找 `.cer` 文件。
 
 自签名证书只适合自用验证，过不了 SmartScreen；对外分发需要 CA / EV 证书，
 用 `sign.bat cert <指纹>` 换证书即可。细节见
@@ -331,7 +354,7 @@ credential-provider\sign.bat verify    rem Successfully verified
 
 compilable and testable 的部分都已完成并**通过编译与单元测试**：
 
-- core 层：密码学、协议、配对、解锁、防重放、三元绑定链 —— 250 个用例全绿
+- core 层：密码学、协议、配对、解锁、防重放、三元绑定链 —— 259 个用例全绿
 - 两端界面（Miuix）：设备页、配对页、管理页、设置页、首次启动向导
 - **原生凭据提供程序**：能出现在锁屏、挂进 Winlogon 登录流程，收到授权后自动提交
   （`ICredentialProvider` / `ICredentialProviderCredential2` / `ICredentialProviderSetUserArray`）

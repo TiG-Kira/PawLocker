@@ -203,8 +203,52 @@ class DesktopWindowsRegistrar : WindowsRegistrar {
         }
     }
 
-    override fun suggestedCredentialProviderPath(): String =
-        "C:\\Program Files\\PawLocker\\PawLockerProvider.dll"
+    /**
+     * 建议的 DLL 位置。
+     *
+     * ## 为什么是「读出来的」而不是硬编码
+     *
+     * 打包时 DLL 由 Compose 的 `appResourcesRootDir` 机制带进安装目录，落在
+     * **`<安装目录>\app\resources\`**（不是安装根目录）—— 这是 jpackage 的固定布局：
+     * 它会把资源目录设成一个系统属性
+     *
+     *     -Dcompose.application.resources.dir=$APPDIR\resources
+     *
+     * 写进生成的 `PawLocker.cfg`。所以运行时直接读这个属性就知道 DLL 在哪，
+     * 不用去猜安装路径、也不怕用户装到非默认目录。
+     *
+     * 退回的顺序是有讲究的：
+     *  1. 系统属性 —— 打包安装的正式路径，最准；
+     *  2. 开发期（`gradle run`）没有那个属性，用仓库里的构建产物；
+     *  3. 都没有时给 Program Files 下的常规位置，纯粹是为了界面上有个像样的初始值，
+     *     用户能自己改。
+     */
+    override fun suggestedCredentialProviderPath(): String {
+        packagedCredentialProviderDll()?.let { return it }
+
+        // 开发期：从工作目录往上找仓库根，再拼构建产物路径
+        generateSequence(File(System.getProperty("user.dir") ?: ".").absoluteFile) { it.parentFile }
+            .take(6)
+            .firstOrNull { File(it, "credential-provider/build/PawLockerProvider.dll").isFile }
+            ?.let { return File(it, "credential-provider/build/PawLockerProvider.dll").absolutePath }
+
+        return "C:\\Program Files\\PawLocker\\PawLockerProvider.dll"
+    }
+
+    /**
+     * 随安装包分发的 DLL 路径，取不到时为 null。
+     *
+     * `compose.application.resources.dir` 指向 `<安装目录>\app\resources`，
+     * 那里是本程序额外资源的落点（jpackage 只把 jar 和启动器放在 `app\` 直属下）。
+     */
+    internal fun packagedCredentialProviderDll(): String? {
+        val resourceDir = System.getProperty(RESOURCES_DIR_PROPERTY)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+
+        val dll = File(resourceDir, CREDENTIAL_PROVIDER_DLL_NAME)
+        return dll.absolutePath.takeIf { dll.isFile }
+    }
 
     // ——————————————————————————————————————————————————————————
     // 代码签名证书信任
@@ -333,7 +377,7 @@ class DesktopWindowsRegistrar : WindowsRegistrar {
             output.contains("取消", ignoreCase = true) ||
             output.contains("拒绝", ignoreCase = true)
 
-    private companion object {
+    internal companion object {
         const val TAG = "WindowsRegistrar"
 
         /**
@@ -353,6 +397,19 @@ class DesktopWindowsRegistrar : WindowsRegistrar {
 
         const val RUN_KEY = "Software\\Microsoft\\Windows\\CurrentVersion\\Run"
         const val RUN_VALUE_NAME = "PawLocker"
+
+        /** 凭据提供程序 DLL 的文件名。与 `windowsApp/resources/windows/` 里那个一致。 */
+        const val CREDENTIAL_PROVIDER_DLL_NAME = "PawLockerProvider.dll"
+
+        /**
+         * jpackage 写进 `PawLocker.cfg` 的资源目录属性。
+         *
+         * 值形如 `<安装根>\app\resources`。改这个名字之前，
+         * 先去 MSI 解包里核对 `app/PawLocker.cfg` 的 `[JavaOptions]` 段 ——
+         * 两边必须逐字一致，否则打包安装后会定位不到 DLL，
+         * 而开发期（不设这个属性、走仓库分支）完全看不出问题。
+         */
+        const val RESOURCES_DIR_PROPERTY = "compose.application.resources.dir"
     }
 }
 
