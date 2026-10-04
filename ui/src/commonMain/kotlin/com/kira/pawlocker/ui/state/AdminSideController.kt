@@ -304,6 +304,26 @@ class AdminSideController(
     fun unregisterCredentialProvider(): RegistrationResult =
         runRegistration { registrar.unregisterCredentialProvider() }
 
+    /**
+     * 信任凭据提供程序 DLL 的签名证书。
+     *
+     * 指纹取自[registrationState]里最近一次体检的结果，而不是在这里重新探测 ——
+     * 用户在界面上看到并确认的是**那一张**证书，写给系统的就必须是那一张。
+     * 传错了会让「信任」变成对另一个对象的授权，而用户毫无察觉。
+     */
+    fun trustDllSignerCertificate(): RegistrationResult {
+        val thumbprint = registrationState.credentialProviderSignature.signerThumbprint
+            ?: return RegistrationResult.Failed("还没读到签名证书，请先重新体检。")
+        return runRegistration { registrar.trustDllSignerCertificate(thumbprint) }
+    }
+
+    /** 撤销对签名证书的信任。 */
+    fun revokeDllSignerCertificate(): RegistrationResult {
+        val thumbprint = registrationState.credentialProviderSignature.signerThumbprint
+            ?: return RegistrationResult.Failed("还没读到签名证书，请先重新体检。")
+        return runRegistration { registrar.revokeDllSignerCertificate(thumbprint) }
+    }
+
     fun ensureFirewallRule(): RegistrationResult =
         runRegistration { registrar.ensureFirewallRule(config.listenPort) }
 

@@ -27,6 +27,7 @@ import com.kira.pawlocker.core.config.WindowsCredential
 import com.kira.pawlocker.core.config.WindowsCredentialStore
 import com.kira.pawlocker.core.config.WindowsUnlockStrategy
 import com.kira.pawlocker.core.crypto.DeviceIds
+import com.kira.pawlocker.core.platform.DllSignatureStatus
 import com.kira.pawlocker.ui.components.GroupCard
 import com.kira.pawlocker.ui.components.LabeledValue
 import com.kira.pawlocker.ui.components.StatusPill
@@ -433,6 +434,40 @@ fun AdminSettingsSection(controller: com.kira.pawlocker.ui.state.AdminSideContro
                                     controller.registerCredentialProvider(
                                         controller.currentCredentialProviderPath(),
                                     )
+                                }
+                            },
+                        )
+
+                        RegistrationRow(
+                            title = "签名证书信任",
+                            ready = state.credentialProviderSignature.isReady,
+                            readyDetail = state.credentialProviderSignature.signerSubject
+                                ?: "签名有效且证书已受信任",
+                            missingDetail = when (state.credentialProviderSignature.status) {
+                                DllSignatureStatus.NotSigned ->
+                                    "DLL 未签名；先用 credential-provider 的 sign.bat 签一遍"
+
+                                DllSignatureStatus.Untrusted ->
+                                    "证书未受信任，锁屏会静默拒绝加载"
+
+                                DllSignatureStatus.Broken ->
+                                    "签名校验不通过（文件被改过或证书过期），重新签一次"
+
+                                DllSignatureStatus.ProbeFailed ->
+                                    state.credentialProviderSignature.probeError ?: "无法确认签名状态"
+
+                                else -> "还没有可检查的 DLL"
+                            },
+                            actionLabel = if (state.credentialProviderSignature.signerTrustedOnMachine) {
+                                "撤销信任"
+                            } else {
+                                "信任"
+                            },
+                            onAction = {
+                                if (state.credentialProviderSignature.signerTrustedOnMachine) {
+                                    controller.revokeDllSignerCertificate()
+                                } else {
+                                    controller.trustDllSignerCertificate()
                                 }
                             },
                         )

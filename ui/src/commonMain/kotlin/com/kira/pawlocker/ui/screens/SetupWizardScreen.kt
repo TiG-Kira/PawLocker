@@ -18,8 +18,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.kira.pawlocker.core.config.WindowsUnlockStrategy
+import com.kira.pawlocker.core.platform.DllSignature
+import com.kira.pawlocker.core.platform.DllSignatureStatus
 import com.kira.pawlocker.core.platform.PendingStep
 import com.kira.pawlocker.core.platform.RegistrationResult
 import com.kira.pawlocker.ui.components.GroupCard
@@ -344,6 +347,14 @@ private fun RegisterStep(controller: AdminSideController) {
                 },
             )
 
+            PendingStep.KEY_SIGN_DLL -> SignDllStep(item)
+
+            PendingStep.KEY_TRUST_SIGNER -> TrustSignerStep(
+                item = item,
+                signature = controller.registrationState.credentialProviderSignature,
+                onTrust = { lastOutcome = controller.trustDllSignerCertificate() },
+            )
+
             else -> GenericStep(item)
         }
     }
@@ -353,6 +364,24 @@ private fun RegisterStep(controller: AdminSideController) {
         LabeledValue("解锁方式", controller.config.unlockStrategy.displayName)
         controller.registrationState.executablePath?.let { path ->
             LabeledValue("程序路径", path)
+        }
+
+        // 只在真的探测过之后才显示：没探测过就写一个「未签名」是在猜，
+        // 而用户会把它当成结论
+        val signature = controller.registrationState.credentialProviderSignature
+        if (signature.probed) {
+            LabeledValue(
+                "DLL 签名",
+                when {
+                    signature.isReady -> "有效，证书已受信任"
+                    signature.isSigned -> "已签名，但证书未受信任"
+                    signature.status == DllSignatureStatus.Broken -> "签名校验不通过"
+                    else -> "未签名"
+                },
+            )
+            signature.signerThumbprint?.let { thumbprint ->
+                LabeledValue("证书指纹", thumbprint.chunked(4).joinToString(" "))
+            }
         }
     }
 }
@@ -426,6 +455,150 @@ private fun CredentialProviderStep(
             ) {
                 Text("注册到 Windows")
             }
+        }
+    }
+}
+
+/**
+ * DLL 没有签名时的引导。
+ *
+ * 这一步**不提供按钮**，因为它不是这台机器上能完成的事 ——
+ * 签名要用 MSVC 工具链在源码仓库里做。给一个点了也没用的按钮，
+ * 比不给按钮更糟：用户会以为点错了地方，然后反复点。
+ * 所以这里只做一件事：把该敲的命令原样列出来。
+ */
+@Composable
+private fun SignDllStep(item: PendingStep) {
+    GroupCard(title = item.title) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "当前这张 DLL 没有 Authenticode 签名。这不一定会立刻出问题 ——" +
+                    "未签名的凭据提供程序在很多个人机器上照样能加载 —— 但被集中管理的机器" +
+                    "（开了 WDAC / AppLocker 的）以及默认开启 Smart App Control 的 Windows 11" +
+                    "会拒绝加载它，而且拒绝发生在锁屏进程里，桌面上看不到任何提示。",
+                style = MiuixTheme.textStyles.body2,
+                color = MiuixTheme.colorScheme.onSurface,
+            )
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "签名在源码仓库里完成，不在这个界面里。到 credential-provider 目录下依次执行：",
+                style = MiuixTheme.textStyles.footnote2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+            Spacer(Modifier.height(8.dp))
+
+            CommandBlock(
+                listOf(
+                    "build.bat        编译出未签名的 DLL",
+                    "sign.bat         用开发证书签名（首次会自动建证书）",
+                    "sign.bat verify  确认签名有效",
+                ),
+            )
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "做完回到本页点「下一步」就会看到「信任签名证书」。" +
+                    "也可以直接在命令行跑 sign.bat trust，效果与下一步的按钮完全一样。",
+                style = MiuixTheme.textStyles.footnote2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+        }
+    }
+}
+
+/**
+ * 信任签名证书 —— 整个向导里安全含义最重的一步。
+ *
+ * 界面上的取舍很明确：**先摊开，再给按钮**。
+ * 用户必须能看见自己要信任的到底是哪一张证书（主体 + 指纹 + 有效期），
+ * 否则「信任」就成了一次盲签 —— 而机器级的证书信任正是最不该盲签的东西。
+ */
+@Composable
+private fun TrustSignerStep(
+    item: PendingStep,
+    signature: DllSignature,
+    onTrust: () -> Unit,
+) {
+    GroupCard(title = item.title) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "锁屏界面由 Windows 的登录进程（LogonUI）加载，它只加载**证书受信任**的" +
+                    "签名组件。证书不被信任时，加载会在锁屏上静默失败 —— " +
+                    "桌面这边没有任何报错，唯一的现象是「手机点了解锁，电脑没反应」。",
+                style = MiuixTheme.textStyles.body2,
+                color = MiuixTheme.colorScheme.onSurface,
+            )
+
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "将要信任的证书",
+                style = MiuixTheme.textStyles.main,
+                color = MiuixTheme.colorScheme.onSurface,
+            )
+            Spacer(Modifier.height(4.dp))
+
+            // 指纹按 4 位一组断开：连续 40 个十六进制字符没法肉眼核对，
+            // 而用户核对指纹正是这一步存在的意义
+            LabeledValue("主体", signature.signerSubject ?: "（未读到）")
+            LabeledValue(
+                "指纹",
+                signature.signerThumbprint?.chunked(4)?.joinToString(" ") ?: "（未读到）",
+            )
+            signature.signerNotAfter?.let { LabeledValue("有效期至", it) }
+            signature.rawStatus?.let { LabeledValue("Windows 判定", it) }
+            signature.statusMessage?.let { message ->
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                    Text(
+                        text = message,
+                        style = MiuixTheme.textStyles.footnote2,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "点下去会把它写进本机两个证书存储：受信任的根证书颁发机构、" +
+                    "受信任的发布者。需要管理员权限。注意这是**机器级**的改动 ——" +
+                    "此后任何用这张证书签名的程序，这台电脑都会认作可信。" +
+                    "开发证书的私钥就放在本机，所以只应该在你自己的机器上这么做；" +
+                    "换成正式发布用的代码签名证书后，这一步根本不需要，因为证书由公共 CA 签发。",
+                style = MiuixTheme.textStyles.footnote2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = onTrust,
+                colors = ButtonDefaults.buttonColorsPrimary(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("信任这张证书")
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "命令行等价做法（需要管理员权限的命令提示符）：",
+                style = MiuixTheme.textStyles.footnote2,
+                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            )
+            Spacer(Modifier.height(4.dp))
+            CommandBlock(listOf("sign.bat trust"))
+        }
+    }
+}
+
+/** 等宽字体展示的命令行片段。沿用设置页展示 frpc.toml 的做法，不额外造背景色。 */
+@Composable
+private fun CommandBlock(lines: List<String>) {
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+        lines.forEach { line ->
+            Text(
+                text = line,
+                style = MiuixTheme.textStyles.footnote2,
+                fontFamily = FontFamily.Monospace,
+                color = MiuixTheme.colorScheme.onSurface,
+            )
         }
     }
 }

@@ -48,6 +48,16 @@ class DesktopWindowsRegistrar : WindowsRegistrar {
         } else {
             null
         }
+        val dllPresent = dllPath?.let { File(it).isFile } == true
+
+        // 签名探测要起一次 PowerShell（实测约 1 秒），所以只在「注册了、DLL 也在」
+        // 这个唯一有意义的前提下才跑。其余情况下这个问题根本不存在，
+        // 白等一秒会让每次体检都像卡了一下 —— 而体检在启动、每次注册操作后都会跑。
+        val signature = if (dllPresent) {
+            SignerTrust.probe(dllPath)
+        } else {
+            DllSignature.Unprobed
+        }
 
         val autoStartRegistered = runCatching {
             Advapi32Util.registryValueExists(WinReg.HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE_NAME) &&
@@ -62,12 +72,13 @@ class DesktopWindowsRegistrar : WindowsRegistrar {
             executablePath = exe,
             credentialProviderRegistered = cpRegistered,
             credentialProviderDllPath = dllPath,
-            credentialProviderDllPresent = dllPath?.let { File(it).exists() } == true,
+            credentialProviderDllPresent = dllPresent,
+            credentialProviderSignature = signature,
             autoStartRegistered = autoStartRegistered,
             firewallRulePresent = firewallRuleExists(ruleName),
             firewallRuleName = ruleName,
             port = port,
-            elevationHint = "注册凭据提供程序与防火墙规则时会弹出 UAC，需要你点「是」",
+            elevationHint = "注册凭据提供程序、信任签名证书与放行防火墙时都会弹出 UAC，需要你点「是」",
         )
     }
 
@@ -189,6 +200,27 @@ class DesktopWindowsRegistrar : WindowsRegistrar {
         "C:\\Program Files\\PawLocker\\PawLockerProvider.dll"
 
     // ——————————————————————————————————————————————————————————
+    // 代码签名证书信任
+    // ——————————————————————————————————————————————————————————
+
+    /**
+     * 把 DLL 的签名证书装进本机受信任存储。
+     *
+     * 「怎么从 DLL 里取出证书、往哪个存储写、怎么读回来验证」都在 [SignerTrust]，
+     * 这里只负责回答一个问题：当前注册的 DLL 是哪一个。
+     */
+    override fun trustDllSignerCertificate(thumbprint: String): RegistrationResult {
+        val dll = registeredDllPath()
+            ?: return RegistrationResult.Failed(
+                "还没注册凭据提供程序，无法确定要信任哪张证书。请先完成上一项。",
+            )
+        return SignerTrust.trust(dll, thumbprint)
+    }
+
+    override fun revokeDllSignerCertificate(thumbprint: String): RegistrationResult =
+        SignerTrust.revoke(registeredDllPath(), thumbprint)
+
+    // ——————————————————————————————————————————————————————————
     // 内部
     // ——————————————————————————————————————————————————————————
 
@@ -219,6 +251,17 @@ class DesktopWindowsRegistrar : WindowsRegistrar {
     private fun readDefaultRegistryValue(path: String): String? =
         runCatching { Advapi32Util.registryGetStringValue(WinReg.HKEY_LOCAL_MACHINE, path, "") }
             .getOrNull()
+
+    /**
+     * 已注册的凭据提供程序 DLL 路径。
+     *
+     * 从 CLSID 的 `InprocServer32` 默认值读 —— 也就是 Windows 实际会去加载的那个路径。
+     * 不用配置里记的路径：两者可能不一致（用户改过配置，或手动改了注册表），
+     * 而要做签名校验和信任的对象必须**跟 Windows 实际加载的一致**，
+     * 否则我们会给一个根本没被加载的 DLL 做信任，真正被加载的那个仍然被拒。
+     */
+    private fun registeredDllPath(): String? =
+        readDefaultRegistryValue(CP_CLSID_KEY + "\\InprocServer32")?.takeIf { it.isNotBlank() }
 
     /** 写一份 UTF-16LE + BOM 的 `.reg` 脚本，交给 `reg import` 执行。 */
     private fun writeRegistryScript(body: String): File {

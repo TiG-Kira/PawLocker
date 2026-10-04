@@ -20,6 +20,16 @@ data class RegistrationState(
     /** 已注册的 DLL 文件当前是否真实存在。 */
     val credentialProviderDllPresent: Boolean = false,
 
+    /**
+     * 已注册 DLL 的 Authenticode 签名状况。
+     *
+     * 为什么体检要管签名：[credentialProviderRegistered] 只说明「注册表里写了」，
+     * 而 LogonUI 真正加载 DLL 时还会校验它的签名。证书没被本机信任时，
+     * 加载会在锁屏上**静默失败** —— 桌面这边看不出任何异常，
+     * 唯一症状是「手机点了解锁但电脑没反应」。所以必须在开始之前就查出来。
+     */
+    val credentialProviderSignature: DllSignature = DllSignature(),
+
     /** 开机启动项是否已写入（HKCU\...\Run）。 */
     val autoStartRegistered: Boolean = false,
 
@@ -69,6 +79,33 @@ data class RegistrationState(
                             detail = "注册表里有记录，但 ${credentialProviderDllPath ?: "DLL"} 不存在",
                         ),
                     )
+                } else {
+                    // DLL 在位之后还有一道门槛：它得签名，而且签名证书得被本机信任。
+                    // Windows 本身不强制凭据提供程序签名，但 WDAC / Smart App Control /
+                    // 大多数 EDR 会拒绝加载未签名或证书不受信任的组件 ——
+                    // 而拒绝发生在 LogonUI 内部，桌面上看不到任何提示。
+                    when (credentialProviderSignature.status) {
+                        DllSignatureStatus.NotSigned -> add(
+                            PendingStep(
+                                key = PendingStep.KEY_SIGN_DLL,
+                                title = "给 DLL 做代码签名",
+                                detail = "当前 DLL 没有 Authenticode 签名；这一步在仓库里用 sign.bat 完成",
+                            ),
+                        )
+
+                        DllSignatureStatus.Untrusted -> add(
+                            PendingStep(
+                                key = PendingStep.KEY_TRUST_SIGNER,
+                                title = "信任签名证书",
+                                detail = "把下面这张证书装进本机受信任存储；需要管理员权限",
+                            ),
+                        )
+
+                        // Trusted / Broken / Unprobed / ProbeFailed 都不在这里加待办：
+                        // Broken 是「签名被改坏」，重签一遍即可，靠界面上的说明引导；
+                        // 探测失败时更要谨慎 —— 不能因为「没看出来」就催用户去信任点什么
+                        else -> Unit
+                    }
                 }
             }
 
@@ -96,6 +133,99 @@ data class RegistrationState(
 }
 
 /**
+ * 一个 DLL 的 Authenticode 签名状况。
+ *
+ * [status] 直接对应 Windows 自己的说法（`Get-AuthenticodeSignature` 的 `Status`），
+ * 但收敛成几个「用户需要做什么」不同的桶 —— 原始的七八种取值里，
+ * 好几种对用户而言是同一件事（比如各种 `UnknownError`），
+ * 而界面上要区分的是「没签名 / 签名了但证书不信任 / 签名有效」这三态。
+ */
+data class DllSignature(
+    val status: DllSignatureStatus = DllSignatureStatus.Unprobed,
+
+    /** 签名证书的主体，例如 `CN=PawLocker Development, O=PawLocker`。 */
+    val signerSubject: String? = null,
+
+    /**
+     * 签名证书的 SHA-1 指纹。
+     *
+     * 用户要拿它去 `certmgr.msc` 里核对，或者在撤销信任时定位到具体哪一张 ——
+     * 显示主体名不够，同主体可以有多张证书。
+     */
+    val signerThumbprint: String? = null,
+
+    /** 签名证书的到期时间（ISO-8601）。自签名开发证书过期后签名会自动失效。 */
+    val signerNotAfter: String? = null,
+
+    /**
+     * Windows 自己给出的原始状态字符串（`Valid` / `NotSigned` / `UnknownError` …）。
+     *
+     * 保留原文是因为**不能靠它下判断**：实测 Windows PowerShell 5.1 在
+     * 「签名没问题但证书不受信任」时返回的是 `UnknownError` 而不是 `NotTrusted`，
+     * 所以「信任与否」只能靠 [signerTrustedOnMachine] 自己查证书存储得出结论。
+     * 但把它原样显示出来，排障时很有价值 —— 用户搜索这个字符串能直接搜到官方文档。
+     */
+    val rawStatus: String? = null,
+
+    /**
+     * 系统的解释文本，例如
+     * 「已处理证书链，但是在不受信任提供程序信任的根证书中终止」。
+     *
+     * 只用于展示，**绝不参与判断**：这句话是本地化的，在英文系统上完全是另一串文字，
+     * 拿它做关键字匹配会在非中文环境上悄悄失效。
+     */
+    val statusMessage: String? = null,
+
+    /** 这张证书是否已经在本机（`LocalMachine`）的受信任根或受信任发布者存储里。 */
+    val signerTrustedOnMachine: Boolean = false,
+
+    /**
+     * 探测本身有没有跑成功。
+     *
+     * 与 [status] 分开：`status` 说的是「DLL 怎么样」，
+     * 而这个说的是「我们有没有成功看出来」。探测失败时把
+     * [status] 当成 `NotSigned` 会是危险的误报 —— 界面会劝用户去签名，
+     * 而问题其实出在别处。所以宁可显示「无法确认」。
+     */
+    val probed: Boolean = false,
+
+    /** 探测失败的原因，用于界面展示与排障。 */
+    val probeError: String? = null,
+) {
+    /** 是否已经签过名（不论证书信不信任）。 */
+    val isSigned: Boolean get() = status == DllSignatureStatus.Trusted ||
+        status == DllSignatureStatus.Untrusted
+
+    /** 签名有效，且证书链在本机受信任 —— 这才是「可以进锁屏」的状态。 */
+    val isReady: Boolean get() = status == DllSignatureStatus.Trusted
+
+    companion object {
+        val Unprobed = DllSignature()
+    }
+}
+
+/** [DllSignature.status] 的取值。刻意只有「用户要做的动作不同」的几档。 */
+enum class DllSignatureStatus {
+    /** 还没探测，或当前平台不支持探测。 */
+    Unprobed,
+
+    /** 探测过程本身失败了（文件读不到、PowerShell 起不来等）。 */
+    ProbeFailed,
+
+    /** DLL 没有 Authenticode 签名。 */
+    NotSigned,
+
+    /** 有签名，但签名证书不在本机受信任存储里。 */
+    Untrusted,
+
+    /** 有签名，证书受信任，且文件未被改动。 */
+    Trusted,
+
+    /** 有签名但校验不过：文件签名后被改过，或证书已过期。 */
+    Broken,
+}
+
+/**
  * 注册向导里的一条待办。
  *
  * [key] 用常量而非枚举，是为了让 UI 能在不 import 平台包的情况下也能做分支
@@ -109,6 +239,13 @@ data class PendingStep(
     companion object {
         const val KEY_FIREWALL = "firewall"
         const val KEY_CREDENTIAL_PROVIDER = "credential_provider"
+
+        /** 给 DLL 做 Authenticode 签名（在仓库里用 `sign.bat`）。 */
+        const val KEY_SIGN_DLL = "sign_dll"
+
+        /** 把 DLL 的签名证书装进本机受信任存储。 */
+        const val KEY_TRUST_SIGNER = "trust_signer"
+
         const val KEY_AUTO_START = "auto_start"
     }
 }
@@ -151,6 +288,24 @@ interface WindowsRegistrar {
 
     fun unregisterCredentialProvider(): RegistrationResult
 
+    /**
+     * 把 [thumbprint] 指定的证书装进本机受信任存储
+     * （`LocalMachine\Root` + `LocalMachine\TrustedPublisher`）。
+     *
+     * 为什么传指纹而不是让实现自己去读 DLL：用户看到并确认的是**某一张特定证书**，
+     * 写进去的就必须是那一张。实现会重新读一次 DLL 当前签名的证书指纹，
+     * 与 [thumbprint] 不符时直接拒绝 —— 否则在「探测」到「用户点确认」这段
+     * 时间窗里换掉 DLL，就能让用户为一张他没见过的证书签字。
+     *
+     * 必须用 `LocalMachine` 而不是 `CurrentUser`：DLL 由 LogonUI 加载，
+     * 而 LogonUI 跑在 SYSTEM 上下文，看不到当前用户的证书存储。
+     * 只信任给当前用户，在锁屏上依然会失败 —— 而且失败得毫无提示。
+     */
+    fun trustDllSignerCertificate(thumbprint: String): RegistrationResult
+
+    /** 反向操作：把该证书从两个 `LocalMachine` 存储里移除。 */
+    fun revokeDllSignerCertificate(thumbprint: String): RegistrationResult
+
     /** 放行 [port] 的 TCP 入站，让手机能连进来。 */
     fun ensureFirewallRule(port: Int): RegistrationResult
 
@@ -184,6 +339,10 @@ class UnsupportedWindowsRegistrar : WindowsRegistrar {
     override fun registerCredentialProvider(dllPath: String): RegistrationResult = unsupported()
 
     override fun unregisterCredentialProvider(): RegistrationResult = unsupported()
+
+    override fun trustDllSignerCertificate(thumbprint: String): RegistrationResult = unsupported()
+
+    override fun revokeDllSignerCertificate(thumbprint: String): RegistrationResult = unsupported()
 
     override fun ensureFirewallRule(port: Int): RegistrationResult = unsupported()
 
