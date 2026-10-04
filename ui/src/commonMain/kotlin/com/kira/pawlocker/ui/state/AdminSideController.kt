@@ -17,6 +17,7 @@ import com.kira.pawlocker.core.net.ServerEventKind
 import com.kira.pawlocker.core.net.ServerHooks
 import com.kira.pawlocker.core.net.UnlockExecutor
 import com.kira.pawlocker.core.net.UnlockOutcome
+import com.kira.pawlocker.core.platform.CleanupReport
 import com.kira.pawlocker.core.platform.PendingStep
 import com.kira.pawlocker.core.platform.PlatformEnv
 import com.kira.pawlocker.core.platform.RegistrationResult
@@ -31,7 +32,9 @@ import com.kira.pawlocker.core.trust.TrustRecord
 import com.kira.pawlocker.core.trust.TrustStore
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Windows 端的界面状态持有者。
@@ -105,6 +108,15 @@ class AdminSideController(
 
     /** 最近一次注册操作的结果文案，非 null 时由界面弹提示。 */
     var registrationMessage: String? by mutableStateOf(null)
+        private set
+
+    /**
+     * 最近一次「清理系统痕迹」的逐项报告，非 null 时由界面展示。
+     *
+     * 与 [registrationMessage] 分开：清理的结果是五项各自的状态，
+     * 压成一句「操作成功」就没有任何信息量了。
+     */
+    var cleanupReport: CleanupReport? by mutableStateOf(null)
         private set
 
     /** 由 App 注入具体的执行器（桌面用 Credential Provider 桥，预览用模拟实现）。 */
@@ -202,11 +214,27 @@ class AdminSideController(
         pairingOffer = null
     }
 
-    /** 配对确认框的「允许」/「拒绝」。 */
+    /**
+     * 配对确认框的「允许」/「拒绝」。
+     *
+     * 由按钮回调驱动，跑在主线程，所以 [pendingApproval] 可以直接写。
+     *
+     * 无论哪种结果都要 `complete` —— 漏掉的话协议层那个
+     * `deferred.await()` 会一直挂到 60 秒超时，手机端表现为「转圈到没」。
+     * `complete` 之后再置空是为了让点击立刻关窗，不必等 await 的调用方醒来。
+     */
     fun resolveApproval(approved: Boolean) {
-        pendingApproval = null
-        approvalDeferred?.complete(approved)
+        val deferred = approvalDeferred
         approvalDeferred = null
+        pendingApproval = null
+        if (deferred != null) {
+            PlatformEnv.log("AdminSideController", "配对确认：${if (approved) "允许" else "拒绝"}")
+            deferred.complete(approved)
+        } else {
+            // 走到这里说明对话框被重复触发过（重组或双击）。
+            // 不记日志的话，重复 complete 的异常会被静默吞掉，只剩「界面卡住」。
+            PlatformEnv.log("AdminSideController", "配对确认：没有待处理的请求，忽略本次操作")
+        }
     }
 
     // ——————————————————————————————————————————————————————————
@@ -305,6 +333,28 @@ class AdminSideController(
         runRegistration { registrar.unregisterCredentialProvider() }
 
     /**
+     * 清掉本程序留在 Windows 里的全部系统痕迹。
+     *
+     * 供「我要卸载了」这个场景使用。这些项都是用户在应用里点按钮才写进系统的，
+     * MSI 不认识它们，所以控制面板里的卸载不会清 —— 不手动清就会留下一地残留
+     * （锁屏上一个点不开的磁贴、一条指向已删程序的防火墙规则）。
+     *
+     * 走自己的 [runRegistration] 语义但**不覆盖** [registrationMessage]：
+     * 清理的结果是逐项报告，塞进一个「操作成功」字符串里会丢掉全部信息量。
+     */
+    fun cleanupSystemTraces(): CleanupReport {
+        val report = registrar.cleanupAllSystemTraces(config.listenPort)
+        cleanupReport = report
+        PlatformEnv.log("AdminSideController", "清理系统痕迹：${report.summary()}")
+        refreshRegistration()
+        return report
+    }
+
+    fun clearCleanupReport() {
+        cleanupReport = null
+    }
+
+    /**
      * 信任凭据提供程序 DLL 的签名证书。
      *
      * 指纹取自[registrationState]里最近一次体检的结果，而不是在这里重新探测 ——
@@ -387,6 +437,17 @@ class AdminSideController(
      *
      * 这里刻意**不设可见的超时**：[LockerServer] 侧已经有 60 秒上限，
      * UI 只需要把对话框摆在那里，超时由协议层兜底。
+     *
+     * ⚠️ 两个线程相关的要点，缺一个就会出现「手机一直等、电脑不弹窗」：
+     *
+     * 1. **必须切到主线程写 `pendingApproval`。** 本方法由 `LockerServer` 的
+     *    协程（`Dispatchers.Default`）调用，直接写 `mutableStateOf` 属于
+     *    后台线程写快照。写本身不会崩，但重组调度不可靠 ——
+     *    表现就是「有时候弹得出来，有时候半天不弹」。
+     *
+     * 2. **`approvalDeferred` 要先赋值再改状态。** 顺序反了会出现
+     *    「UI 已经渲染出按钮，但 deferred 还没就绪」的窗口，
+     *    用户在这个窗口里点「允许」会静默无效。
      */
     override suspend fun confirmPairing(
         phoneDisplayName: String,
@@ -395,7 +456,9 @@ class AdminSideController(
     ): Boolean {
         val deferred = CompletableDeferred<Boolean>()
         approvalDeferred = deferred
-        pendingApproval = PendingApproval(phoneDisplayName, phoneModel, phoneDeviceId)
+        withContext(Dispatchers.Main) {
+            pendingApproval = PendingApproval(phoneDisplayName, phoneModel, phoneDeviceId)
+        }
         return deferred.await()
     }
 

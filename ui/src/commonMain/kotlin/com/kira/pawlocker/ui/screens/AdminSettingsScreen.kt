@@ -27,6 +27,8 @@ import com.kira.pawlocker.core.config.WindowsCredential
 import com.kira.pawlocker.core.config.WindowsCredentialStore
 import com.kira.pawlocker.core.config.WindowsUnlockStrategy
 import com.kira.pawlocker.core.crypto.DeviceIds
+import com.kira.pawlocker.core.platform.CleanupReport
+import com.kira.pawlocker.core.platform.CleanupStatus
 import com.kira.pawlocker.core.platform.DllSignatureStatus
 import com.kira.pawlocker.core.platform.RegistrationState
 import com.kira.pawlocker.core.protocol.Protocol
@@ -57,6 +59,7 @@ fun AdminSettingsSection(controller: com.kira.pawlocker.ui.state.AdminSideContro
     val config = controller.config
     var showFrpcPreview by remember { mutableStateOf(false) }
     var showCredentialDialog by remember { mutableStateOf(false) }
+    var showCleanupConfirm by remember { mutableStateOf(false) }
 
     LazyColumn(contentPadding = PaddingValues(bottom = 32.dp)) {
 
@@ -510,6 +513,12 @@ fun AdminSettingsSection(controller: com.kira.pawlocker.ui.state.AdminSideContro
                                 colors = ButtonDefaults.textButtonColorsPrimary(),
                             )
                         }
+
+                        Spacer(Modifier.height(12.dp))
+                        CleanupSection(
+                            hasTraces = hasSystemTraces(state),
+                            onCleanup = { showCleanupConfirm = true },
+                        )
                     }
                 }
             }
@@ -554,6 +563,22 @@ fun AdminSettingsSection(controller: com.kira.pawlocker.ui.state.AdminSideContro
 
     if (showCredentialDialog) {
         CredentialDialog(onDismiss = { showCredentialDialog = false })
+    }
+
+    if (showCleanupConfirm) {
+        CleanupConfirmDialog(
+            onDismiss = { showCleanupConfirm = false },
+            onConfirm = {
+                showCleanupConfirm = false
+                controller.cleanupSystemTraces()
+            },
+        )
+    }
+
+    // 清理的逐项结果。刻意不塞进 registrationMessage 那个「操作结果」框 ——
+    // 五项各自的状态压成一句话就没有信息量了，用户看不出还剩什么没清。
+    controller.cleanupReport?.let { report ->
+        CleanupReportDialog(report = report, onDismiss = { controller.clearCleanupReport() })
     }
 
     // 注册操作（要弹 UAC 的那种）的结果反馈。
@@ -613,6 +638,165 @@ private fun TunnelField(
             style = MiuixTheme.textStyles.footnote2,
             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
         )
+    }
+}
+
+/**
+ * 「本机还留着哪些痕迹」。
+ *
+ * 每一项都对应一处**用户在应用里点过按钮才写进系统**的位置，MSI 不认识它们，
+ * 所以控制面板里的卸载不会动。留着它们的后果写在每项的说明里。
+ *
+ * 防火墙那项按「本程序自己创建的那条」算。Windows 首次监听时自动生成的
+ * 按应用规则虽然也是我们造成的，但体检分不清是不是本程序建的
+ * （见 `firewallRuleOwned` 的注释），而清理时会按程序路径把它一起删掉。
+ */
+private fun hasSystemTraces(state: RegistrationState): Boolean =
+    state.credentialProviderRegistered ||
+        state.autoStartRegistered ||
+        state.firewallRuleOwned ||
+        state.credentialProviderSignature.signerTrustedOnMachine
+
+/** 「卸载前清理」区块。放在注册状态下面，因为它就是注册的反向操作。 */
+@Composable
+private fun CleanupSection(hasTraces: Boolean, onCleanup: () -> Unit) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "卸载前清理",
+            style = MiuixTheme.textStyles.footnote2,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "凭据提供程序、防火墙规则、签名证书信任、开机启动项都是在应用里点按钮时" +
+                "才写进系统的，安装包不认识它们 —— 直接从「应用和功能」卸载，这些会全部留下。" +
+                "其中锁屏上那个点不开的 PawLocker 磁贴最麻烦：它会让用户以为软件还在，" +
+                "而重装并不会消掉它。",
+            style = MiuixTheme.textStyles.footnote2,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusPill(
+                text = if (hasTraces) "本机留有痕迹" else "已清理干净",
+                tone = if (hasTraces) StatusTone.Warning else StatusTone.Active,
+            )
+            Spacer(Modifier.width(12.dp))
+            TextButton(text = "清理系统痕迹", onClick = onCleanup)
+        }
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "会弹出一次 UAC。清理只动本程序留下的项，不碰你的其他软件配置；" +
+                "配对记录与身份密钥不受影响，之后重装能直接用。",
+            style = MiuixTheme.textStyles.footnote2,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        )
+    }
+}
+
+@Composable
+private fun CleanupConfirmDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
+    OverlayDialog(
+        title = "清理本机系统痕迹？",
+        summary = "即将移除：\n" +
+            "• 锁屏凭据提供程序注册与 DLL 类注册（CLSID）\n" +
+            "• 本程序的入站防火墙规则\n" +
+            "• DLL 签名证书在本机的受信任存储\n" +
+            "• PawLocker 的开机启动项\n\n" +
+            "这些动作之后要重新走一遍首次启动向导才能恢复。" +
+            "配对记录和身份密钥不受影响，手机上已配对的电脑仍然认这台机器。",
+        show = true,
+        onDismissRequest = onDismiss,
+    ) {
+        Spacer(Modifier.height(16.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            TextButton(text = "取消", onClick = onDismiss, modifier = Modifier.weight(1f))
+            TextButton(
+                text = "确认清理",
+                onClick = onConfirm,
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.textButtonColorsPrimary(),
+            )
+        }
+    }
+}
+
+/** 逐项展示清理结果。未清干净的排在前面 —— 那是用户唯一需要看的东西。 */
+@Composable
+private fun CleanupReportDialog(report: CleanupReport, onDismiss: () -> Unit) {
+    val ordered = report.outstanding + report.items.filter { it.isClean }
+
+    OverlayDialog(
+        title = if (report.isClean) "已清理干净" else "部分项目未清干净",
+        summary = report.summary(),
+        show = true,
+        onDismissRequest = onDismiss,
+    ) {
+        Column {
+            ordered.forEach { item ->
+                val note = item.note
+                Row(verticalAlignment = Alignment.Top) {
+                    StatusPill(
+                        text = when (item.status) {
+                            CleanupStatus.Done -> "已清"
+                            CleanupStatus.Skipped -> "本无"
+                            CleanupStatus.Cancelled -> "已取消"
+                            CleanupStatus.Failed -> "失败"
+                        },
+                        tone = when (item.status) {
+                            CleanupStatus.Done, CleanupStatus.Skipped -> StatusTone.Active
+                            else -> StatusTone.Error
+                        },
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = item.label,
+                            style = MiuixTheme.textStyles.body2,
+                            color = MiuixTheme.colorScheme.onSurface,
+                        )
+                        if (item.detail.isNotBlank()) {
+                            Text(
+                                text = item.detail,
+                                style = MiuixTheme.textStyles.footnote2,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            )
+                        }
+                        // note 只在「没清干净」时有值 —— 它是给用户的行动指令。
+                        // 「已清」时多说一句都是噪音。
+                        if (!item.isClean && note != null) {
+                            Text(
+                                text = note,
+                                style = MiuixTheme.textStyles.footnote2,
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+
+            if (!report.isClean) {
+                Text(
+                    text = "失败项多半是被组策略接管或被别的安全软件锁住了。" +
+                        "可以重启后再试一次；仍不行就按上面写的注册表路径手动删。",
+                    style = MiuixTheme.textStyles.footnote2,
+                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+        Button(
+            onClick = onDismiss,
+            colors = ButtonDefaults.buttonColorsPrimary(),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("知道了")
+        }
     }
 }
 

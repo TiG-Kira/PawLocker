@@ -14,6 +14,8 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,6 +32,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
@@ -141,8 +144,16 @@ private fun CameraPreview(
     val previewView = remember(bindAttempt) {
         PreviewView(context).apply {
             scaleType = PreviewView.ScaleType.FILL_CENTER
-            // COMPATIBLE 模式走 TextureView，兼容性好于 SurfaceView 的层级裁剪行为
-            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            // ⚠️ 这里**必须**用 PERFORMANCE（SurfaceView），不能图省事用 COMPATIBLE。
+            //
+            // COMPATIBLE 走 TextureView，它是独立硬件图层，**不参与 Compose 的
+            // 裁剪与合成顺序**：即使外层给了固定高度，画面也会溢出容器，
+            // 把上方的「扫一扫 / 手动输入」切换器整个盖住，
+            // 用户的实际观感是「点开扫码页，相机糊了一脸，按钮点不到」。
+            //
+            // 代价是需要处理权限变更时的重建（该模式不支持 setSurfaceProvider
+            // 动态切换），而本视图本来就绑了 bindAttempt 重建机制，天然覆盖。
+            implementationMode = PreviewView.ImplementationMode.PERFORMANCE
         }
     }
 
@@ -192,7 +203,14 @@ private fun CameraPreview(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    // clipToBounds 保留作为双保险：万一以后有人改回 COMPATIBLE 模式，
+    // 至少溢出部分不会绘制出去，把上方切换器盖住。
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clipToBounds(),
+        contentAlignment = Alignment.Center,
+    ) {
         AndroidView(
             factory = { previewView },
             modifier = Modifier.fillMaxSize(),
@@ -205,9 +223,16 @@ private fun CameraPreview(
             Text(
                 text = "把电脑屏幕上显示的二维码放进取景框",
                 style = MiuixTheme.textStyles.body2,
-                // 相机预览不是主题表面，这里的对比度只能自己保证
+                // 相机预览不是主题表面，这里的对比度只能自己保证：
+                // 纯白字压在亮画面上会看不清，垫一层半透明黑底。
                 color = Color.White,
-                modifier = Modifier.padding(bottom = 32.dp),
+                modifier = Modifier
+                    // 水平与底部内距分开写：Compose 的 padding 不支持
+                    // horizontal 与 bottom 混在一次调用里
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 32.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
             )
         }
     }

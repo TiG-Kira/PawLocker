@@ -127,50 +127,12 @@ fun AdminScreen(
     }
 
     // ———— 手机请求配对：电脑端确认 ————
-    val pending = controller.pendingApproval
-    if (pending != null) {
-        OverlayDialog(
-            title = "允许这台手机配对？",
-            show = true,
-            onDismissRequest = { controller.resolveApproval(false) },
-        ) {
-            Column {
-                Text(
-                    text = "设备名称：${pending.phoneDisplayName}",
-                    style = MiuixTheme.textStyles.body2,
-                    color = MiuixTheme.colorScheme.onSurface,
-                )
-                Text(
-                    text = "型号：${pending.phoneModel}",
-                    style = MiuixTheme.textStyles.body2,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                )
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    text = "如果这不是你本人操作，请点「拒绝」。允许后该手机将可以解锁这台电脑。",
-                    style = MiuixTheme.textStyles.footnote1,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                )
-            }
-            Spacer(Modifier.height(16.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                TextButton(
-                    text = "拒绝",
-                    onClick = { controller.resolveApproval(false) },
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(
-                    text = "允许",
-                    onClick = { controller.resolveApproval(true) },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.textButtonColorsPrimary(),
-                )
-            }
-        }
-    }
+    //
+    // ⚠️ 确认框**不在这里渲染**。它是跨页面的全局状态：
+    // 服务端在任何页面（首次启动向导 / 登录小窗 / 管理页）都在接受连接，
+    // 弹窗只挂在管理页的话，用户停在向导页时就会看到「手机配对没反应」，
+    // 而协议层那边 `deferred.await()` 一直挂着，60 秒后静默超时断开 ——
+    // 两端都没有任何错误提示。统一提到 ComputerApp 顶层渲染。
 
     // ———— 服务错误 ————
     val error = controller.lastError
@@ -190,6 +152,13 @@ fun AdminScreen(
             }
         }
     }
+
+    // 配对审批弹窗必须挂在**本页的 Scaffold 内部**。
+    // Miuix 的 OverlayDialog 只是往 CompositionLocal 登记渲染记录，
+    // 真正把它画出来的是 MiuixPopupHost —— 而只有 Scaffold 会调用它。
+    // 放在 Scaffold 外面会静默不显示（无异常、无日志、手机端照常超时）。
+    // 详见 PairingApproval.kt 的说明。
+    PairingApprovalDialog(controller)
 }
 
 private enum class AdminSection(val label: String) {

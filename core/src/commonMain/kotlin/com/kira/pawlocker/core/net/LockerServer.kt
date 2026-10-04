@@ -230,7 +230,17 @@ class LockerServer(
                 ),
             )
 
+            // 握手成功是排查「手机连上了但没反应」的关键分界点：
+            // 有这条日志说明网络与服务都正常，问题在配对流程；
+            // 没有的话就是地址、端口或防火墙的事。缺了它只能靠猜。
             val activePairing = pairingSession
+            val pairingLive = activePairing != null &&
+                !activePairing.isExpired(PlatformEnv.currentTimeMillis())
+            PlatformEnv.log(
+                TAG,
+                "握手完成：${hello.displayName}（${hello.model}）来自 $remote；" +
+                    "配对窗口${if (pairingLive) "已开启" else "未开启"}",
+            )
 
             connection.send(
                 ServerHello(
@@ -266,7 +276,17 @@ class LockerServer(
                 }
             }
         } catch (error: Throwable) {
-            PlatformEnv.log(TAG, "连接 $remote 处理异常: ${error.message}")
+            // Socket closed 是最常见的一种，而且含义很明确：手机等不到回应后自己断了。
+            // 单独说明一下，否则看到这行只会以为「连接被拒」，实际是「已处理完但结果没送达」。
+            if (error is java.io.IOException && error.message?.contains("Socket closed") == true) {
+                PlatformEnv.log(
+                    TAG,
+                    "连接 $remote 已关闭。原因通常是：等待用户确认超时（${PAIRING_APPROVAL_TIMEOUT / 1000} 秒）" +
+                        "或对方提前断开。若刚扫过码，请确认电脑上已点「允许」。",
+                )
+            } else {
+                PlatformEnv.log(TAG, "连接 $remote 处理异常: ${error.message}")
+            }
         } finally {
             runCatching { connection.close() }
         }
@@ -280,6 +300,11 @@ class LockerServer(
         val now = PlatformEnv.currentTimeMillis()
         val session = pairingSession
         if (session == null) {
+            PlatformEnv.log(
+                TAG,
+                "收到 $remote 的配对请求，但本机没有开启配对窗口 —— " +
+                    "在管理页点「添加手机」后重试",
+            )
             connection.send(ErrorMessage(ErrorCodes.PAIRING_CLOSED, "电脑端未开启配对，请在管理页点击「添加手机」"))
             return
         }
@@ -287,6 +312,7 @@ class LockerServer(
         val payload = try {
             session.decryptRequest(request, now)
         } catch (error: PairingException) {
+            PlatformEnv.log(TAG, "配对请求解密失败（来自 $remote）：${error.code} ${error.message}")
             throttle.recordFailure(remote, now)
             connection.send(ErrorMessage(error.code, error.message ?: "配对失败"))
             return
@@ -294,6 +320,11 @@ class LockerServer(
 
         // 先告诉手机「请求已收到，等电脑确认」，避免它超时重试
         connection.send(PairPending(session.pairingId, now))
+        PlatformEnv.log(
+            TAG,
+            "等待用户确认配对：${payload.phoneDisplayName}（${payload.phoneModel}）来自 $remote，" +
+                "最多等 ${PAIRING_APPROVAL_TIMEOUT / 1000} 秒",
+        )
 
         val approved = withTimeoutOrNull(PAIRING_APPROVAL_TIMEOUT) {
             hooks.confirmPairing(
@@ -302,6 +333,13 @@ class LockerServer(
                 phoneDeviceId = payload.phoneDeviceId,
             )
         } ?: false
+
+        if (!approved) {
+            PlatformEnv.log(
+                TAG,
+                "配对未获批准（超时或用户点拒绝）—— 手机端会收到拒绝响应，$remote",
+            )
+        }
 
         val reason = if (approved) null else "电脑端拒绝了本次配对（或确认超时）"
 

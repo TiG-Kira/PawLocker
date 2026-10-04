@@ -4,11 +4,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -304,7 +306,16 @@ fun ComputerApp(
     createUnlockExecutor: (AppConfig) -> UnlockExecutor,
 ) {
     PawLockerTheme {
-        val scope = rememberCoroutineScope()
+        // ⚠️ 这里**必须**用应用级 scope，不能用 rememberCoroutineScope()。
+        //
+        // rememberCoroutineScope 绑在组合生命周期上：重组导致它重建时，
+        // 里面挂起的协程会被一起取消。而配对确认正是「挂起等人点按钮」的操作 ——
+        // scope 被取消 = deferred 永远等不到 = 协议层 60 秒后静默超时断开，
+        // 两端都没有任何提示。
+        //
+        // controller 的生命周期必须比任何一个页面都长，所以这个 scope
+        // 只在 ComputerApp 整体离开组合时才取消。
+        val appScope = rememberCoroutineScope()
         var controller by remember { mutableStateOf<AdminSideController?>(null) }
         var fatalError by remember { mutableStateOf<String?>(null) }
 
@@ -312,7 +323,7 @@ fun ComputerApp(
             runCatching {
                 withContext(Dispatchers.Default) {
                     val identity = IdentityKeyFactory.loadOrCreate(IdentityAliases.COMPUTER)
-                    AdminSideController(identity, FileTrustStore(), profile, scope)
+                    AdminSideController(identity, FileTrustStore(), profile, appScope)
                 }
             }.onSuccess { created ->
                 created.unlockExecutor = createUnlockExecutor(created.config)

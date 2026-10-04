@@ -19,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.kira.pawlocker.core.protocol.Protocol
@@ -165,15 +166,22 @@ private fun ScanPane(
     enabled: Boolean,
     onDecoded: (String) -> Unit,
 ) {
-    Column(modifier = Modifier.fillMaxSize()) {
+    // ⚠️ 这里用 Column 而不是 fillMaxSize()。
+    //
+    // 相机预览在 COMPATIBLE 模式下是 TextureView，属于独立硬件图层，
+    // 绘制时可能溢出自身高度。曾经就是这个溢出把上方的
+    // 「扫一扫 / 手动输入」切换器盖住了 —— 用户的观感是「相机糊了一脸，
+    // 按钮点不到」。qrScanView 那侧已经加了 clipToBounds，
+    // 但布局上也不该给相机无限生长的空间。
+    Column(modifier = Modifier.fillMaxWidth()) {
         if (enabled) {
             QrScanView(
                 onDecoded = onDecoded,
-                modifier = Modifier.fillMaxWidth().height(320.dp),
+                modifier = Modifier.fillMaxWidth().height(SCAN_PANE_HEIGHT).clipToBounds(),
             )
         } else {
             Box(
-                modifier = Modifier.fillMaxWidth().height(320.dp),
+                modifier = Modifier.fillMaxWidth().height(SCAN_PANE_HEIGHT),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -190,8 +198,13 @@ private fun ScanPane(
             StepRow("3", "用本机扫描二维码")
             StepRow("4", "核对手机与电脑上显示的校验图案是否一致")
         }
+
+        Spacer(Modifier.height(16.dp))
     }
 }
+
+/** 取景区高度。固定值而不是自适应：相机画面尺寸变化不该牵动上方按钮的位置。 */
+private val SCAN_PANE_HEIGHT = 300.dp
 
 @Composable
 private fun StepRow(index: String, text: String) {

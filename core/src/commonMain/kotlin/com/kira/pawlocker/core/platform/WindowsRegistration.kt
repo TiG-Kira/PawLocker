@@ -322,6 +322,86 @@ sealed interface RegistrationResult {
     val isSuccess: Boolean get() = this is Success
 }
 
+/** 「清理本机痕迹」里单项操作的结果。 */
+enum class CleanupStatus {
+
+    /** 原本就在，现在已经清掉。 */
+    Done,
+
+    /**
+     * 原本就不在。
+     *
+     * 单看不是「成功」，但对「卸载要干净」这个目标而言它就是成功 ——
+     * 清理的目标是「现在没有」，不是「删除动作执行过」。
+     * 所以它和 [Done] 一样不该让用户觉得有事没做完。
+     */
+    Skipped,
+
+    /** 试过了，但没成功。需要用户自己看一眼。 */
+    Failed,
+
+    /** 用户在 UAC 上点了否，或中途取消。 */
+    Cancelled,
+}
+
+/** 清理报告里的一项。 */
+data class CleanupItem(
+    /** 这一项清理的是什么，给用户看的短标签。 */
+    val label: String,
+
+    /** 具体的注册表路径 / 规则名，排障时要能直接照着去查。 */
+    val detail: String,
+
+    val status: CleanupStatus,
+
+    /**
+     * 补充说明。
+     *
+     * 存在的意义是「有东西没清掉，但用户不必管」与「没清掉，用户得自己动手」
+     * 得区分开 —— 后者必须说清楚，不然用户以为已经干净了。
+     */
+    val note: String? = null,
+) {
+    val isClean: Boolean get() = status == CleanupStatus.Done || status == CleanupStatus.Skipped
+}
+
+/**
+ * 一次「清理本机痕迹」的完整结果。
+ *
+ * ## 为什么要逐项报告，而不是像 [RegistrationResult] 那样只给成功/失败
+ *
+ * 清理动的是**五处互不相干的位置**（凭据提供程序注册表、证书存储、
+ * 防火墙规则、开机启动项、DLL 文件）。整体一个布尔值会让「4 项成功 1 项失败」
+ * 和「5 项全失败」长得一模一样，用户既不知道还剩什么没清，
+ * 也不知道是该重试还是只能手动处理。
+ *
+ * 这正是「静默卡住比报错更糟」的另一种形态：不是没提示，是提示得没有信息量。
+ */
+data class CleanupReport(val items: List<CleanupItem>) {
+
+    val doneCount: Int get() = items.count { it.status == CleanupStatus.Done }
+    val skippedCount: Int get() = items.count { it.status == CleanupStatus.Skipped }
+    val failedCount: Int get() = items.count { it.status == CleanupStatus.Failed }
+    val cancelledCount: Int get() = items.count { it.status == CleanupStatus.Cancelled }
+
+    /** 该清的现在都不在了。 */
+    val isClean: Boolean get() = failedCount == 0 && cancelledCount == 0
+
+    /** 还没清掉的项，界面上优先展示这些。 */
+    val outstanding: List<CleanupItem>
+        get() = items.filter { !it.isClean }
+
+    /** 一行结论，用于日志与对话框标题。 */
+    fun summary(): String = when {
+        items.isEmpty() -> "没有需要清理的项目"
+        isClean && doneCount == 0 -> "本机本来就没有 PawLocker 的系统痕迹"
+        isClean -> "已清理 $doneCount 项" +
+            (if (skippedCount > 0) "，另有 $skippedCount 项本就不存在" else "")
+        else -> "已清理 ${doneCount + skippedCount} 项，" +
+            "${failedCount} 项失败${if (cancelledCount > 0) "、${cancelledCount} 项被取消" else ""}"
+    }
+}
+
 /**
  * Windows 侧「把解锁方式注册进系统」的能力。
  *
@@ -346,6 +426,38 @@ interface WindowsRegistrar {
     fun registerCredentialProvider(dllPath: String): RegistrationResult
 
     fun unregisterCredentialProvider(): RegistrationResult
+
+    /**
+     * 清掉本程序留在 Windows 里的**全部**系统痕迹。
+     *
+     * ## 为什么需要这个方法（而不是让用户在控制面板里卸载）
+     *
+     * MSI 只知道自己装了什么。而下面这几项全都是**用户在应用里点了按钮之后**
+     * 才写进系统的，MSI 眼里根本不存在这些注册表项 ——
+     * 所以「控制面板 → 卸载」之后：
+     *
+     * | 残留 | 后果 |
+     * |---|---|
+     * | `HKLM\...\Credential Providers\{GUID}` | 锁屏上留着一个点开就报错的 PawLocker 磁贴 |
+     * | `HKLM\SOFTWARE\Classes\CLSID\{GUID}` | DLL 已随安装目录一起消失，LogonUI 加载不到 |
+     * | 受信任根 / 受信任发布者里的自签证书 | 一条永远撤不掉的自签根信任 |
+     * | `netsh` 防火墙规则 | 一条指向已不存在程序路径的入站放行 |
+     * | `HKCU\...\Run` 项 | 每次登录都试图启动一个已被卸载的程序 |
+     *
+     * 其中「锁屏上留着一个点不开的磁贴」最难受：用户看到它就会以为软件还在，
+     * 于是反复重装，而重装又不会消掉它。
+     *
+     * ## 为什么不是「卸载时自动做」
+     *
+     * 自动做需要 MSI 挂自定义动作（WiX `CAQuietExec`），而 Compose 的
+     * `AbstractJPackageTask` 没有暴露任何透传 jpackage 参数的口子
+     * （`makeArgs` 里的选项是硬编码的白名单，没有 `--installer-args` 之类）。
+     * 绕过去只能改生成的 `.wxs` 再重新编译 —— 那条路会让每次升级都要手工介入，
+     * 比留着残留更糟。所以这里选「用户主动清理」：把按钮放在卸载说明旁边。
+     *
+     * @param port 用于定位本程序自己创建的那条防火墙规则
+     */
+    fun cleanupAllSystemTraces(port: Int): CleanupReport
 
     /**
      * 把 [thumbprint] 指定的证书装进本机受信任存储
@@ -398,6 +510,8 @@ class UnsupportedWindowsRegistrar : WindowsRegistrar {
     override fun registerCredentialProvider(dllPath: String): RegistrationResult = unsupported()
 
     override fun unregisterCredentialProvider(): RegistrationResult = unsupported()
+
+    override fun cleanupAllSystemTraces(port: Int): CleanupReport = CleanupReport(emptyList())
 
     override fun trustDllSignerCertificate(thumbprint: String): RegistrationResult = unsupported()
 

@@ -145,6 +145,99 @@ class DesktopWindowsRegistrar : WindowsRegistrar {
     }
 
     // ——————————————————————————————————————————————————————————
+    // 卸载清理
+    // ——————————————————————————————————————————————————————————
+
+    override fun cleanupAllSystemTraces(port: Int): CleanupReport {
+        val items = mutableListOf<CleanupItem>()
+
+        // 开机启动项先清：它不需要提权，而在提权进程里写 HKCU 会写到
+        // 管理员账户的注册表去 —— 那不是「启动过 PawLocker 的那个用户」。
+        // 而且万一后面的 UAC 被拒，这一条也已经生效了。
+        items += removeAutoStartEntry()
+
+        // 证书指纹必须在删注册表**之前**取：指纹来自已注册 DLL 的签名，
+        // 而 DLL 路径记在 CLSID 的 InprocServer32 里，删了就再也读不到。
+        // 读不到就传 null，脚本会把证书那一项报成 skipped 而不是失败。
+        val thumbprint = registeredDllPath()
+            ?.let { SignerTrust.probe(it).signerThumbprint }
+        if (thumbprint == null) {
+            PlatformEnv.log(TAG, "清理：读不到 DLL 签名指纹，证书项将按「本来就没有」处理")
+        }
+
+        // 开发期（跑在 java.exe 上）**不能**按程序路径删防火墙规则 ——
+        // 本机有一堆别的 Java 应用规则，拿 host 进程路径去批量删会误伤。
+        // 按名字删自己那条仍然是安全的（名字带 TCP 端口，足够独特）。
+        val exe = executablePath()
+        val deleteByProgram = FirewallProbe.keywordOf(exe).isNotEmpty()
+        if (!deleteByProgram) {
+            PlatformEnv.log(TAG, "清理：开发期（宿主进程 $exe），按程序路径删防火墙规则已禁用")
+        }
+
+        items += WindowsCleanup.run(
+            script = WindowsCleanup.script(
+                providerKey = CP_PROVIDER_KEY,
+                clsidKey = CP_CLSID_KEY,
+                thumbprint = thumbprint,
+                port = port,
+                ownRuleName = firewallRuleName(port),
+                exePath = exe,
+                deleteByProgram = deleteByProgram,
+            ),
+            onCancelled = ::cancelledItems,
+        )
+
+        val report = CleanupReport(items)
+        PlatformEnv.log(TAG, "清理系统痕迹：${report.summary()}")
+        report.outstanding.forEach {
+            PlatformEnv.log(TAG, "  未清干净：${it.label} —— ${it.detail} ${it.note.orEmpty()}")
+        }
+        return report
+    }
+
+    /**
+     * 删开机启动项。
+     *
+     * 只在**值确实指向本程序**时才删：`HKCU\...\Run` 是用户的全局命名空间，
+     * 里面可能有一个叫 `PawLocker` 但指向别的东西的项（比如用户自己写的脚本）。
+     * 不校验就删属于误伤。
+     */
+    private fun removeAutoStartEntry(): CleanupItem {
+        val exe = executablePath()
+        val label = "开机启动项"
+        val detail = "HKCU\\$RUN_KEY\\$RUN_VALUE_NAME"
+
+        return runCatching {
+            if (!Advapi32Util.registryValueExists(WinReg.HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE_NAME)) {
+                return CleanupItem(label, detail, CleanupStatus.Skipped)
+            }
+            val value = Advapi32Util.registryGetStringValue(
+                WinReg.HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE_NAME,
+            )
+            if (exe == null || !value.contains(exe, ignoreCase = true)) {
+                return CleanupItem(
+                    label = label,
+                    detail = detail,
+                    status = CleanupStatus.Failed,
+                    note = "该项存在但指向的不是本程序（值：$value），已保留不删",
+                )
+            }
+            Advapi32Util.registryDeleteValue(WinReg.HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE_NAME)
+            CleanupItem(label, detail, CleanupStatus.Done)
+        }.getOrElse { error ->
+            CleanupItem(label, detail, CleanupStatus.Failed, error.message)
+        }
+    }
+
+    /** UAC 被拒时逐项报「已取消」，而不是笼统一句「失败」。 */
+    private fun cancelledItems(): List<CleanupItem> = listOf(
+        "锁屏凭据提供程序注册",
+        "DLL 类注册（CLSID）",
+        "入站防火墙规则",
+        "DLL 签名证书信任",
+    ).map { CleanupItem(it, "HKLM / LocalMachine", CleanupStatus.Cancelled, "UAC 未获授权，未做任何改动") }
+
+    // ——————————————————————————————————————————————————————————
     // 防火墙
     // ——————————————————————————————————————————————————————————
 

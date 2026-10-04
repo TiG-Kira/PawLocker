@@ -136,6 +136,29 @@ PawLockerUI.exe        普通用户权限
      `SetStringField(CREDUI_PASSWORD_FIELD_INDEX, ...)` 后返回
      `S_OK` 让 LogonUI 提交
 - **代价**：需要代码签名证书（EV 证书最好，普通 OV 也行）才能让 Winlogon 加载
+- **卸载残留**：注册凭据提供程序写的是**用户点了按钮之后**才有的注册表项，
+  MSI 完全不认识它们 —— 从「应用和功能」卸载之后下面这些全都留着：
+
+  | 残留位置 | 后果 |
+  |---|---|
+  | `HKLM\...\Credential Providers\{GUID}` | 锁屏留一个点开就报错的磁贴 |
+  | `HKLM\SOFTWARE\Classes\CLSID\{GUID}` | LogonUI 去加载一个已不存在的 DLL |
+  | `LocalMachine\Root` + `TrustedPublisher` | 一条撤不掉的自签根信任 |
+  | `netsh` 入站规则（按名字 + 按程序路径两条） | 一条指向已删程序的入站放行 |
+  | `HKCU\...\Run` | 每次登录试图启动一个已被卸载的程序 |
+
+  所以设置页里有「卸载前清理」入口（`WindowsCleanup`），
+  一次 UAC 全部清掉，并**逐项报告**结果 —— 不是一句「操作成功」，
+  因为「4 项成功 1 项失败」和「5 项全失败」必须让用户分得出来。
+
+  锁屏上那个点不开的磁贴最坑：它会让用户认为软件还在，于是反复重装，
+  而重装不会消掉它（它压根不是 MSI 装的）。
+
+  **为什么不做成「卸载时自动清理」**：那需要 MSI 挂 WiX 自定义动作
+  （`CAQuietExec`），而 Compose 的 `AbstractJPackageTask` 没有暴露任何
+  透传 jpackage 参数的口子 —— `makeArgs` 里的选项是硬编码白名单。
+  绕过去只能改生成的 `.wxs` 再手工 `candle`/`light` 重编译，
+  那样每次升级都要人工介入，比留着残留更糟。
 
 ### 路径 B：仅唤醒屏幕（零依赖，立即可用）
 
@@ -207,6 +230,42 @@ androidApp:MainActivity (FragmentActivity)
 | `Transport` | `Dispatchers.IO` | 阻塞式 Socket 读写 |
 
 所有网络操作都不在 Main 线程上执行。UI 永远不会被 IO 卡住。
+
+### 「需要人点头」的弹窗必须挂在 Scaffold 内部
+
+Miuix 的 `OverlayDialog` **不是**自己画对话框的。它只做两件事：
+
+1. 把「要画一个弹窗」这条记录写进 `LocalDialogStates`（一个 `staticCompositionLocalOf`）
+2. 什么都不画
+
+真正把它画出来的是 `MiuixPopupHost` —— 而 `MiuixPopupHost` **只有 `Scaffold` 会调用**
+（`MiuixPopupUtils.Companion.MiuixPopupHost`，Miuix 内部函数，`internal` 修饰，
+外部模块调不到）。
+
+所以把 `OverlayDialog` 放在 Scaffold 外面会**静默不显示**：
+
+- 没有异常
+- 没有日志
+- 协议层那边照常 `await()` 到 60 秒超时断开
+- 手机端只看到「扫码后没反应」
+
+「PC 端收不到配对允许窗口」这个 bug 有**两层**，症状一模一样：
+
+| 层 | 写法 | 失败方式 |
+|---|---|---|
+| 1 | 弹窗只挂在 `AdminScreen` 里 | 用户停在向导页 / 登录小窗时组件根本不创建 |
+| 2 | 弹窗提到 `ComputerApp` 顶层（仍不在 Scaffold 里） | 组件创建了，登记进 CompositionLocal，但没人读 → 不渲染 |
+
+第 1 层修好后第 2 层才暴露出来。这类 bug 靠读代码很难一次看全，
+**必须真机跑一遍**。
+
+现在的做法：状态（`AdminSideController.pendingApproval`）提到全局唯一，
+组件（`PairingApprovalDialog`）在**每一个带 Scaffold 的桌面页面**里各渲染一份。
+多渲染几份组件不会产生多个待确认请求 —— 都读同一份状态，
+`resolveApproval` 也是幂等的。
+
+> **新增页面的检查项**：如果打算往这个页面里加 `OverlayDialog`，
+> 先确认它在 Scaffold **内部**。想放全局就得先问「谁提供 MiuixPopupHost」。
 
 ---
 

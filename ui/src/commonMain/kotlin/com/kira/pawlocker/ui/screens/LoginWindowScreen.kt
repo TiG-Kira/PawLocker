@@ -223,6 +223,13 @@ fun LoginWindowScreen(
             )
         }
     }
+
+    // 配对审批弹窗必须挂在**本页的 Scaffold 内部**。
+    // Miuix 的 OverlayDialog 只是往 CompositionLocal 登记渲染记录，
+    // 真正把它画出来的是 MiuixPopupHost —— 而只有 Scaffold 会调用它。
+    // 放在 Scaffold 外面会静默不显示（无异常、无日志、手机端照常超时）。
+    // 详见 PairingApproval.kt 的说明。
+    PairingApprovalDialog(controller)
 }
 
 @Composable
